@@ -191,6 +191,36 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void preservesLocalChangeToGeneratedManifestAndRemovesRejectedCommit(@TempDir Path temp) throws Exception {
+        Path remote = createRemoteRepository(temp);
+        Path clone = temp.resolve("clone");
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var adapter = new GitHubTransferRepositoryAdapter(properties(remote, clone), mapper);
+        adapter.synchronize();
+
+        TransferId transferId = TransferId.newId();
+        byte[] content = "chunk-data".getBytes();
+        TransferChunk chunk = chunk(content, "part-00001.bin");
+        TransferManifest manifest = manifest(transferId, "arquivo.zip", content, chunk);
+        Path manifestPath = clone.resolve("transfers").resolve(transferId.toString()).resolve("manifest.json");
+        String localChange = "manual manifest edit that must survive the rejected publication";
+        installPushFailureWithConcurrentEdit(clone, manifestPath, localChange);
+
+        assertThatThrownBy(() -> adapter.publishManifest(manifest))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("rollback concluído")
+                .hasMessageContaining("alterações locais")
+                .hasMessageContaining("preservadas no clone")
+                .hasMessageContaining("faça commit ou descarte-as");
+        assertThat(Files.readString(manifestPath)).isEqualTo(localChange);
+        assertThat(adapter.listTransfers()).isEmpty();
+        assertThat(runCapture(clone, "git", "log", "-1", "--pretty=%s")).isEqualTo("seed\n");
+        assertThat(runCapture(clone, "git", "status", "--porcelain", "--untracked-files=all"))
+                .contains("?? transfers/" + transferId + "/manifest.json");
+        assertThat(runCapture(remote, "git", "log", "-1", "--pretty=%s", "main")).isEqualTo("seed\n");
+    }
+
+    @Test
     void rejectsBlobAboveConfiguredLimitWithoutExposingRemoteDetails(@TempDir Path temp) throws Exception {
         StorageProperties properties = properties(temp.resolve("remote.git"), temp.resolve("clone"));
         properties.getGit().setMaxBlobSize(DataSize.ofBytes(3));

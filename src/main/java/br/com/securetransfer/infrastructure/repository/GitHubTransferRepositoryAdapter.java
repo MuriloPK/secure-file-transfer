@@ -25,6 +25,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -275,24 +276,79 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
             runGitWithConfiguration("criar commit Git", "commit", "-m", message);
             runGit("enviar alterações ao repositório Git", "push", ORIGIN, properties.getBranch());
         } catch (IOException | RuntimeException exception) {
-            rollbackFailedPublication(previousHead, exception);
+            rollbackFailedPublication(previousHead, exception, paths);
             throw exception;
         }
     }
 
-    private void rollbackFailedPublication(String previousHead, Exception publicationFailure) {
+    private void rollbackFailedPublication(String previousHead, Exception publicationFailure, String... generatedPaths) {
+        Set<String> locallyChangedGeneratedPaths;
+        try {
+            locallyChangedGeneratedPaths = locallyChangedPaths(generatedPaths);
+        } catch (IOException statusFailure) {
+            throw rollbackFailure(publicationFailure, statusFailure);
+        }
+
         try {
             runGit("remover publicação Git local rejeitada preservando alterações locais",
                     "reset", "--keep", previousHead);
         } catch (IOException | RuntimeException rollbackFailure) {
-            StorageException safeFailure = new StorageException(
-                    "falha ao publicar no repositório Git; não foi possível concluir o rollback com segurança"
-                            + "; alterações locais podem ter sido preservadas no clone",
-                    publicationFailure);
-            safeFailure.addSuppressed(rollbackFailure);
-            throw safeFailure;
+            if (!locallyChangedGeneratedPaths.isEmpty()) {
+                try {
+                    rollbackWithConcurrentGeneratedEdits(previousHead, generatedPaths, locallyChangedGeneratedPaths);
+                } catch (IOException | RuntimeException safeRollbackFailure) {
+                    throw rollbackFailure(publicationFailure, safeRollbackFailure);
+                }
+            } else {
+                throw rollbackFailure(publicationFailure, rollbackFailure);
+            }
         }
 
+        verifyRollbackState(publicationFailure);
+    }
+
+    private Set<String> locallyChangedPaths(String... paths) throws IOException {
+        Set<String> changedPaths = new HashSet<>();
+        for (String path : paths) {
+            String status = runGitCapture("verificar alterações concorrentes no arquivo publicado",
+                    "status", "--porcelain", "--untracked-files=all", "--", path);
+            if (!status.isBlank()) {
+                changedPaths.add(path);
+            }
+        }
+        return changedPaths;
+    }
+
+    private void rollbackWithConcurrentGeneratedEdits(String previousHead, String[] generatedPaths,
+                                                       Set<String> locallyChangedGeneratedPaths) throws IOException {
+        // A mixed reset changes only the index, so an edit made over a generated file
+        // remains in the working tree while the rejected publication leaves HEAD.
+        runGit("remover publicação Git local rejeitada preservando edição no mesmo arquivo",
+                "reset", "--mixed", previousHead);
+        for (String path : generatedPaths) {
+            if (locallyChangedGeneratedPaths.contains(path)) {
+                continue;
+            }
+            restoreOrRemoveGeneratedPath(previousHead, path);
+        }
+    }
+
+    private void restoreOrRemoveGeneratedPath(String previousHead, String path) throws IOException {
+        String previousPath = runGitCapture("verificar o arquivo anterior à publicação",
+                "ls-tree", "-r", "--name-only", previousHead, "--", path);
+        if (!previousPath.isBlank()) {
+            runGit("restaurar o arquivo anterior à publicação",
+                    "restore", "--source", previousHead, "--worktree", "--", path);
+            return;
+        }
+        Path generatedPath = repositoryRoot.resolve(path).normalize();
+        if (!generatedPath.startsWith(repositoryRoot)) {
+            throw new IllegalArgumentException("caminho gerado fora do clone Git");
+        }
+        Files.deleteIfExists(generatedPath);
+    }
+
+    private void verifyRollbackState(Exception publicationFailure) {
         String status;
         try {
             status = runGitCapture("verificar o estado do clone após o rollback",
@@ -300,7 +356,8 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         } catch (IOException statusFailure) {
             StorageException safeFailure = new StorageException(
                     "falha ao publicar no repositório Git; o rollback foi concluído, mas não foi possível"
-                            + " verificar o estado do clone",
+                            + " verificar o estado do clone; preserve as alterações locais e sincronize o clone"
+                            + " manualmente antes de tentar novamente",
                     publicationFailure);
             safeFailure.addSuppressed(statusFailure);
             throw safeFailure;
@@ -312,6 +369,16 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
                             + " foram preservadas no clone; faça commit ou descarte-as antes de tentar novamente",
                     publicationFailure);
         }
+    }
+
+    private static StorageException rollbackFailure(Exception publicationFailure, Exception rollbackFailure) {
+        StorageException safeFailure = new StorageException(
+                "falha ao publicar no repositório Git; não foi possível desfazer automaticamente a publicação"
+                        + " rejeitada com segurança; preserve as alterações locais, sincronize o clone"
+                        + " manualmente e remova o commit rejeitado antes de tentar novamente",
+                publicationFailure);
+        safeFailure.addSuppressed(rollbackFailure);
+        return safeFailure;
     }
 
     private static String failureMessage(Exception failure) {
