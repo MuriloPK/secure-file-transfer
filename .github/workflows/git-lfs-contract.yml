@@ -1,0 +1,109 @@
+name: Git LFS hosted contract
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 4 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: secure-transfer-git-lfs-contract
+  cancel-in-progress: false
+
+jobs:
+  git-lfs-contract:
+    runs-on: ubuntu-latest
+    environment: git-lfs-contract
+    env:
+      SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST: "true"
+      SECURE_TRANSFER_GIT_LFS_TEST_REMOTE: ${{ secrets.SECURE_TRANSFER_GIT_LFS_TEST_REMOTE }}
+      SECURE_TRANSFER_GIT_LFS_TEST_BRANCH: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_BRANCH }}
+      SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES }}
+      SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate protected contract configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SECURE_TRANSFER_GIT_LFS_TEST_REMOTE" \
+            || { echo "::error::configure SECURE_TRANSFER_GIT_LFS_TEST_REMOTE as an environment secret"; exit 1; }
+          test -n "$SECURE_TRANSFER_GIT_LFS_TEST_BRANCH" \
+            || { echo "::error::configure SECURE_TRANSFER_GIT_LFS_TEST_BRANCH as an environment variable"; exit 1; }
+          test -n "$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES" \
+            || { echo "::error::configure SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES as an environment variable"; exit 1; }
+          test -n "$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES" \
+            || { echo "::error::configure SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES as an environment variable"; exit 1; }
+          case "$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES:$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES" in
+            *[!0-9:]*|*:*[!0-9]*) echo "::error::chunk and minimum sizes must be positive integers"; exit 1 ;;
+          esac
+          test "$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES" -gt 0 \
+            || { echo "::error::chunk size must be positive"; exit 1; }
+          test "$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES" -gt 0 \
+            || { echo "::error::minimum chunk size must be positive"; exit 1; }
+          test "$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES" -ge "$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES" \
+            || { echo "::error::chunk size must be at least the configured minimum"; exit 1; }
+
+      - name: Configure SSH credentials
+        shell: bash
+        env:
+          GIT_LFS_CONTRACT_SSH_PRIVATE_KEY: ${{ secrets.GIT_LFS_CONTRACT_SSH_PRIVATE_KEY }}
+          GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS: ${{ secrets.GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$GIT_LFS_CONTRACT_SSH_PRIVATE_KEY" \
+            || { echo "::error::configure GIT_LFS_CONTRACT_SSH_PRIVATE_KEY as an environment secret"; exit 1; }
+          test -n "$GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS" \
+            || { echo "::error::configure GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS as an environment secret"; exit 1; }
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$GIT_LFS_CONTRACT_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+          {
+            echo "GIT_SSH_COMMAND=ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+            echo "GIT_TERMINAL_PROMPT=0"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Install Git LFS client
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v git-lfs >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes git-lfs
+          fi
+          git lfs version
+
+      - name: Run hosted Git LFS contract
+        id: contract
+        run: ./mvnw -Dtest=GitHubTransferRepositoryAdapterTest test
+
+      - name: Record contract result and observed limits
+        if: always()
+        shell: bash
+        env:
+          CONTRACT_RESULT: ${{ steps.contract.outcome }}
+        run: |
+          {
+            echo "## Git LFS hosted contract"
+            echo ""
+            echo "- Result: \`$CONTRACT_RESULT\`"
+            echo "- Remote: protected environment secret (redacted)"
+            echo "- Branch: \`$SECURE_TRANSFER_GIT_LFS_TEST_BRANCH\`"
+            echo "- Minimum chunk size validated: \`$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES\` bytes"
+            echo "- Chunk size exercised: \`$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES\` bytes"
+            echo "- Stages: authentication, LFS pointer publication, manifest publication, listing, download"
+            echo "- Credentials: SSH private key and known hosts supplied by protected environment secrets"
+          } >> "$GITHUB_STEP_SUMMARY"

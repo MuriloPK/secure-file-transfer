@@ -298,33 +298,52 @@ class GitHubTransferRepositoryAdapterTest {
         StorageProperties firstProperties = hostedLfsProperties(remote, branch, temp.resolve("clone-a"));
         var first = new GitHubTransferRepositoryAdapter(firstProperties, mapper);
 
-        first.synchronize();
-        first.publishChunk(transferId, chunk, source);
-        Path checkedInChunk = firstProperties.getPath().resolve("transfers")
-                .resolve(transferId.toString()).resolve("chunks").resolve(chunk.fileName());
-        assertThat(Files.size(checkedInChunk)).isEqualTo(chunkBytes);
-        assertThat(runCapture(firstProperties.getPath(), "git", "show", "HEAD:"
-                + "transfers/" + transferId + "/chunks/" + chunk.fileName()))
-                .startsWith("version https://git-lfs.github.com/spec/v1");
+        runContractStage("authentication and repository access", first::synchronize);
+        runContractStage("LFS pointer publication", () -> {
+            first.publishChunk(transferId, chunk, source);
+            Path checkedInChunk = firstProperties.getPath().resolve("transfers")
+                    .resolve(transferId.toString()).resolve("chunks").resolve(chunk.fileName());
+            assertThat(Files.size(checkedInChunk)).isEqualTo(chunkBytes);
+            assertThat(runCapture(firstProperties.getPath(), "git", "show", "HEAD:"
+                    + "transfers/" + transferId + "/chunks/" + chunk.fileName()))
+                    .startsWith("version https://git-lfs.github.com/spec/v1");
+        });
 
         TransferManifest manifest = new TransferManifest(transferId.value(), "arquivo.zip", chunkBytes,
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 chunkBytes, 1, new TransferManifest.EncryptionMetadata("AES/GCM/NoPadding"),
                 List.of(chunk), Instant.now(), TransferStatus.AVAILABLE);
-        first.publishManifest(manifest);
+        runContractStage("manifest publication", () -> first.publishManifest(manifest));
 
         var second = new GitHubTransferRepositoryAdapter(
                 hostedLfsProperties(remote, branch, temp.resolve("clone-b")), mapper);
-        second.synchronize();
-        assertThat(second.listTransfers()).extracting(TransferManifest::transferId)
-                .contains(transferId.value());
-        Path downloaded = temp.resolve("downloaded.bin");
-        try (InputStream input = second.downloadChunk(transferId, chunk);
-             OutputStream output = Files.newOutputStream(downloaded)) {
-            input.transferTo(output);
+        runContractStage("listing", () -> {
+            second.synchronize();
+            assertThat(second.listTransfers()).extracting(TransferManifest::transferId)
+                    .contains(transferId.value());
+        });
+        runContractStage("download", () -> {
+            Path downloaded = temp.resolve("downloaded.bin");
+            try (InputStream input = second.downloadChunk(transferId, chunk);
+                 OutputStream output = Files.newOutputStream(downloaded)) {
+                input.transferTo(output);
+            }
+            assertThat(Files.size(downloaded)).isEqualTo(chunkBytes);
+            assertThat(Files.mismatch(source, downloaded)).isEqualTo(-1L);
+        });
+        System.out.printf("Git LFS contract passed: stages=authentication, pointer-publication, "
+                + "manifest-publication, listing, download; chunkBytes=%d; minimumChunkBytes=%d%n",
+                chunkBytes, minimumChunkBytes);
+    }
+
+    private static void runContractStage(String stage, ContractOperation operation) throws Exception {
+        try {
+            operation.run();
+        } catch (Exception | AssertionError failure) {
+            AssertionError stageFailure = new AssertionError("Git LFS contract stage failed: " + stage);
+            stageFailure.initCause(failure);
+            throw stageFailure;
         }
-        assertThat(Files.size(downloaded)).isEqualTo(chunkBytes);
-        assertThat(Files.mismatch(source, downloaded)).isEqualTo(-1L);
     }
 
     @Test
@@ -536,6 +555,11 @@ class GitHubTransferRepositoryAdapterTest {
 
     private static String shellQuote(String value) {
         return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
+    @FunctionalInterface
+    private interface ContractOperation {
+        void run() throws Exception;
     }
 
     private static void run(Path directory, String... command) throws Exception {
