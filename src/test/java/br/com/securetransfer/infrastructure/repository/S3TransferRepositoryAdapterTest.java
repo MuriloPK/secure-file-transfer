@@ -7,8 +7,14 @@ import br.com.securetransfer.domain.model.TransferChunk;
 import br.com.securetransfer.domain.model.TransferId;
 import br.com.securetransfer.domain.model.TransferManifest;
 import br.com.securetransfer.domain.model.TransferStatus;
+import br.com.securetransfer.application.service.DownloadFileService;
+import br.com.securetransfer.application.service.ListTransfersService;
+import br.com.securetransfer.application.service.PublishFileService;
+import br.com.securetransfer.application.service.ValidateTransferService;
+import br.com.securetransfer.presentation.cli.TransferCli;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.springframework.beans.factory.ObjectProvider;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
@@ -33,8 +39,10 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import org.springframework.util.unit.DataSize;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -645,6 +653,121 @@ class S3TransferRepositoryAdapterTest {
         }
     }
 
+    @Test
+    void cleansUpOldOrphanedChunkThroughCliAgainstARealS3CompatibleBucket(@TempDir Path temp) throws Throwable {
+        assumeTrue(Boolean.parseBoolean(System.getenv(CONTRACT_TEST_ENABLED)),
+                "contrato S3-compatible desabilitado");
+
+        String bucket = requiredEnvironment(CONTRACT_TEST_BUCKET);
+        String endpoint = optionalEnvironment(CONTRACT_TEST_ENDPOINT);
+        String region = environmentOrDefault(CONTRACT_TEST_REGION, "us-east-1");
+        boolean pathStyleAccess = Boolean.parseBoolean(
+                environmentOrDefault(CONTRACT_TEST_PATH_STYLE, "true"));
+        TransferId namespaceId = TransferId.newId();
+        TransferId orphanTransferId = TransferId.newId();
+        TransferId availableTransferId = TransferId.newId();
+        String metadataPrefix = isolatedPrefix(
+                environmentOrDefault(CONTRACT_TEST_METADATA_PREFIX, "metadata"), namespaceId);
+        String blobPrefix = isolatedPrefix(
+                environmentOrDefault(CONTRACT_TEST_BLOB_PREFIX, "blobs"), namespaceId);
+
+        StorageProperties properties = new StorageProperties();
+        properties.setType(StorageProperties.StorageType.OBJECT);
+        properties.getS3().setBucket(bucket);
+        properties.getS3().setEndpoint(endpoint);
+        properties.getS3().setRegion(region);
+        properties.getS3().setMetadataPrefix(metadataPrefix);
+        properties.getS3().setBlobPrefix(blobPrefix);
+        properties.getS3().setPathStyleAccess(pathStyleAccess);
+        // MinIO and some S3-compatible services expose Last-Modified at
+        // second precision, so keep enough retention for that contract.
+        properties.getS3().setOrphanRetention(Duration.ofSeconds(1));
+
+        String orphanFileName = "orphan-part-00001.bin";
+        String availableFileName = "available-part-00001.bin";
+        String orphanKey = blobPrefix + "/" + orphanTransferId + "/chunks/" + orphanFileName;
+        String availableBlobKey = blobPrefix + "/" + availableTransferId + "/chunks/" + availableFileName;
+        String availableMetadataKey = metadataPrefix + "/" + availableTransferId + "/manifest.json";
+        byte[] orphanContent = "real-s3-compatible-orphan".getBytes(StandardCharsets.UTF_8);
+        byte[] availableContent = "real-s3-compatible-available".getBytes(StandardCharsets.UTF_8);
+        Path orphanSource = temp.resolve(orphanFileName);
+        Path availableSource = temp.resolve(availableFileName);
+        Files.write(orphanSource, orphanContent);
+        Files.write(availableSource, availableContent);
+        TransferChunk orphanChunk = new TransferChunk(1, orphanContent.length, orphanContent.length,
+                sha256(orphanContent), "b3JwaGFuLW5vbmNl", orphanFileName);
+        TransferChunk availableChunk = new TransferChunk(1, availableContent.length, availableContent.length,
+                sha256(availableContent), "YXZhaWxhYmxlLW5vbmNl", availableFileName);
+        TransferManifest availableManifest = new TransferManifest(
+                availableTransferId.value(), "arquivo-disponivel.zip", availableContent.length,
+                sha256(availableContent), availableContent.length, 1,
+                new TransferManifest.EncryptionMetadata("AES/GCM/NoPadding"),
+                List.of(availableChunk), Instant.now(), TransferStatus.AVAILABLE);
+
+        S3Client client = createClient(properties.getS3());
+        Throwable failure = null;
+        try {
+            S3TransferRepositoryAdapter adapter = new S3TransferRepositoryAdapter(properties, mapper, client);
+            adapter.publishChunk(orphanTransferId, orphanChunk, orphanSource);
+            adapter.publishChunk(availableTransferId, availableChunk, availableSource);
+            adapter.publishManifest(availableManifest);
+            awaitObjectsOlderThan(client, bucket, blobPrefix + "/", List.of(orphanKey, availableBlobKey),
+                    properties.getS3().getOrphanRetention());
+
+            ObjectProvider<S3TransferRepositoryAdapter> cleanerProvider = mock(ObjectProvider.class);
+            when(cleanerProvider.getIfAvailable()).thenReturn(adapter);
+            TransferCli cli = new TransferCli(
+                    mock(PublishFileService.class),
+                    mock(DownloadFileService.class),
+                    mock(ListTransfersService.class),
+                    mock(ValidateTransferService.class),
+                    cleanerProvider);
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            PrintStream originalOut = System.out;
+            try {
+                System.setOut(new PrintStream(output, true, StandardCharsets.UTF_8));
+                cli.run("cleanup-orphaned-blobs");
+            } finally {
+                System.setOut(originalOut);
+            }
+
+            assertThat(output.toString(StandardCharsets.UTF_8))
+                    .contains("Candidatos: 2")
+                    .contains("Removidos: 1")
+                    .contains("Preservados (manifest presente): 1")
+                    .contains("Falhas: 0");
+            assertThatThrownBy(() -> client.headObject(request -> request
+                    .bucket(bucket).key(orphanKey).build()))
+                    .isInstanceOf(software.amazon.awssdk.services.s3.model.S3Exception.class)
+                    .satisfies(exception -> assertThat(
+                            ((software.amazon.awssdk.services.s3.model.S3Exception) exception).statusCode())
+                            .isEqualTo(404));
+            assertThat(adapter.exists(availableTransferId)).isTrue();
+            assertThat(adapter.listTransfers()).extracting(TransferManifest::transferId)
+                    .containsExactly(availableTransferId.value());
+            try (InputStream downloaded = adapter.downloadChunk(availableTransferId, availableChunk)) {
+                assertThat(downloaded.readAllBytes()).containsExactly(availableContent);
+            }
+        } catch (Throwable exception) {
+            failure = exception;
+            throw exception;
+        } finally {
+            try {
+                client.deleteObject(request -> request.bucket(bucket).key(orphanKey).build());
+                client.deleteObject(request -> request.bucket(bucket).key(availableBlobKey).build());
+                client.deleteObject(request -> request.bucket(bucket).key(availableMetadataKey).build());
+            } catch (RuntimeException cleanupException) {
+                if (failure != null) {
+                    failure.addSuppressed(cleanupException);
+                } else {
+                    throw cleanupException;
+                }
+            } finally {
+                client.close();
+            }
+        }
+    }
+
     private S3TransferRepositoryAdapter adapter(S3Client client) {
         return new S3TransferRepositoryAdapter(properties(), mapper, client);
     }
@@ -680,6 +803,29 @@ class S3TransferRepositoryAdapterTest {
 
     private static String isolatedPrefix(String basePrefix, TransferId transferId) {
         return basePrefix.replaceAll("/+$", "") + "/contract-" + transferId;
+    }
+
+    private static void awaitObjectsOlderThan(
+            S3Client client, String bucket, String prefix, List<String> expectedKeys, Duration age)
+            throws InterruptedException {
+        Instant deadline = Instant.now().plusSeconds(10);
+        while (Instant.now().isBefore(deadline)) {
+            Instant cutoff = Instant.now().minus(age);
+            List<S3Object> objects = client.listObjectsV2(request -> request
+                            .bucket(bucket)
+                            .prefix(prefix)
+                            .build())
+                    .contents();
+            boolean oldObjectsAreVisible = expectedKeys.stream().allMatch(expectedKey -> objects.stream()
+                    .anyMatch(object -> expectedKey.equals(object.key())
+                            && object.lastModified() != null
+                            && object.lastModified().isBefore(cutoff)));
+            if (oldObjectsAreVisible) {
+                return;
+            }
+            Thread.sleep(25);
+        }
+        throw new AssertionError("objetos de contrato não ficaram antigos a tempo: " + expectedKeys);
     }
 
     private static String sha256(byte[] content) throws Exception {

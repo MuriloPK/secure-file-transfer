@@ -350,7 +350,11 @@ O teste de contrato usa o AWS SDK contra um bucket real da AWS, MinIO ou outro
 serviço compatível. Ele é opt-in, publica um chunk e o manifest, confirma que o
 manifest só aparece depois do chunk, lista a transferência, baixa o conteúdo por
 streaming, valida o tamanho e verifica que os objetos usam prefixes separados.
-Cada execução usa um prefixo isolado e remove os dois objetos ao terminar.
+Ele também cria um chunk antigo sem manifest, executa
+`cleanup-orphaned-blobs` pela CLI, confirma as quatro contagens do relatório e
+verifica que o chunk de uma transferência com manifest permanece intacto.
+Cada execução usa prefixes isolados e remove todos os objetos temporários ao
+terminar.
 
 Configure um bucket de teste descartável e forneça as credenciais pela cadeia
 padrão do AWS SDK (variáveis de ambiente do provedor, role ou profile), sem
