@@ -1,36 +1,36 @@
-# [Project name]
+# Secure File Transfer
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+CLI Java 21 que publica e baixa ZIPs em chunks AES-256-GCM com validação SHA-256 e retomada.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `./mvnw clean verify` — compila e executa todos os testes
+- `java -jar target/secure-file-transfer-1.0.0.jar` — abre a CLI
+- Required env for transfer operations: `TRANSFER_SECRET`
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Java 21, Spring Boot 3.4, Maven
+- Jackson, Bean Validation, JUnit 5, AssertJ
+- Sem banco de dados
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- Código principal: `src/main/java/br/com/securetransfer`
+- Configuração: `src/main/resources/application.yml`
+- Testes: `src/test/java/br/com/securetransfer`
+- Guia operacional: `README.md`
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- O manifest é sempre publicado por último.
+- Downloads incompletos mantêm chunks validados para retomada.
+- O arquivo final só é movido após SHA-256 e tamanho conferirem.
+- Storage é uma porta; a primeira implementação usa diretório local/compartilhado.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Publica, lista, verifica e baixa arquivos ZIP de até 200 MB usando chunks configuráveis, AES-GCM e SHA-256.
 
 ## User preferences
 
@@ -38,7 +38,8 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Os dois computadores precisam usar o mesmo `TRANSFER_SECRET`.
+- O diretório de destino deve existir e o arquivo final não pode existir.
 
 ## Pointers
 

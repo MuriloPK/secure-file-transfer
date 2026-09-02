@@ -1,32 +1,36 @@
 package br.com.securetransfer.configuration;
 
-import jakarta.validation.constraints.Positive;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.util.unit.DataSize;
 import org.springframework.validation.annotation.Validated;
-
-import java.nio.file.Path;
 
 @Validated
 @ConfigurationProperties(prefix = "transfer")
 public class TransferProperties {
-    @Positive
-    private long maxFileSize = 200L * 1024 * 1024;
-    @Positive
-    private long chunkSize = 5L * 1024 * 1024;
+    private DataSize maxFileSize = DataSize.ofMegabytes(200);
+    private DataSize chunkSize = DataSize.ofMegabytes(5);
 
-    public long getMaxFileSize() {
+    public DataSize getMaxFileSize() {
         return maxFileSize;
     }
 
-    public void setMaxFileSize(long maxFileSize) {
+    public void setMaxFileSize(DataSize maxFileSize) {
         this.maxFileSize = maxFileSize;
     }
 
-    public long getChunkSize() {
+    public DataSize getChunkSize() {
         return chunkSize;
     }
 
-    public void setChunkSize(long chunkSize) {
+    public void setChunkSize(DataSize chunkSize) {
         this.chunkSize = chunkSize;
+    }
+
+    public long maxFileSizeBytes() {
+        return maxFileSize.toBytes();
+    }
+
+    public long chunkSizeBytes() {
+        return chunkSize.toBytes();
     }
 }

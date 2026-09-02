@@ -33,12 +33,12 @@ public class ChunkService {
                                                 ProgressListener progress) throws IOException {
         List<PreparedChunk> chunks = new ArrayList<>();
         long fileSize = Files.size(source);
-        long totalChunks = fileSize == 0 ? 0 : (fileSize + properties.getChunkSize() - 1) / properties.getChunkSize();
+        long chunkSize = properties.chunkSizeBytes();
+        long totalChunks = fileSize == 0 ? 0 : (fileSize + chunkSize - 1) / chunkSize;
         try (InputStream input = new BufferedInputStream(Files.newInputStream(source))) {
             for (int number = 1; number <= totalChunks; number++) {
                 Path encryptedPath = uploadDirectory.resolve(String.format("part-%05d.bin", number)).normalize();
-                long limit = Math.min(properties.getChunkSize(),
-                        fileSize - ((long) (number - 1) * properties.getChunkSize()));
+                long limit = Math.min(chunkSize, fileSize - ((long) (number - 1) * chunkSize));
                 CountingLimitedInputStream chunkInput = new CountingLimitedInputStream(input, limit);
                 EncryptionPort.EncryptionResult result;
                 try (var output = new BufferedOutputStream(Files.newOutputStream(encryptedPath))) {

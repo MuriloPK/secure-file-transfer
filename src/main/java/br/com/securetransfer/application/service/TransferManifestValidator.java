@@ -26,10 +26,11 @@ public class TransferManifestValidator {
         if (manifest == null || manifest.transferId() == null ||
                 manifest.transferId().equals(new UUID(0, 0)) ||
                 manifest.originalSize() < 0 || manifest.chunkSize() <= 0 ||
-                manifest.chunkSize() > properties.getMaxFileSize() ||
+                manifest.chunkSize() > properties.maxFileSizeBytes() ||
                 manifest.totalChunks() < 0 || manifest.totalChunks() > MAX_CHUNKS_SAFETY_LIMIT ||
                 !isSha256(manifest.originalSha256()) ||
                 manifest.encryption() == null ||
+                manifest.chunks() == null ||
                 !AES_GCM.equals(manifest.encryption().algorithm())) {
             throw new InvalidManifestException("campos básicos inválidos");
         }
