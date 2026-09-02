@@ -14,6 +14,8 @@ storage:
     metadata-prefix: metadata
     blob-prefix: blobs
     path-style-access: true
+    # Chunks enviados antes de um manifest são descartados explicitamente
+    # quando a publicação falha antes de iniciar o envio do manifest.
   git:
     # Para storage.type=git, use SSH ou o credential helper do Git.
     # Nunca coloque token/senha em remote.

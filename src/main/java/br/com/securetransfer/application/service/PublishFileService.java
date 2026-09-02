@@ -59,6 +59,7 @@ public class PublishFileService {
         TransferId transferId = TransferId.newId();
         Path uploadDirectory = temporaryFiles.createUploadDirectory(transferId);
         LOGGER.info("transfer started transferId={} size={}", transferId, size);
+        boolean manifestPublicationStarted = false;
         try {
             String originalHash;
             try (var inputStream = new BufferedInputStream(Files.newInputStream(input))) {
@@ -78,11 +79,28 @@ public class PublishFileService {
                     transferId.value(), fileName, size, originalHash, properties.chunkSizeBytes(),
                     metadata.size(), new TransferManifest.EncryptionMetadata("AES/GCM/NoPadding"),
                     metadata, Instant.now(), TransferStatus.AVAILABLE);
+            manifestPublicationStarted = true;
             repository.publishManifest(manifest);
             LOGGER.info("transfer completed transferId={} size={}", transferId, size);
             return manifest;
+        } catch (IOException | RuntimeException exception) {
+            if (!manifestPublicationStarted) {
+                cleanupUnpublishedTransfer(transferId, exception);
+            }
+            throw exception;
         } finally {
             temporaryFiles.cleanup(uploadDirectory);
+        }
+    }
+
+    private void cleanupUnpublishedTransfer(TransferId transferId, Exception publicationFailure) {
+        try {
+            repository.cleanupUnpublishedTransfer(transferId);
+            LOGGER.info("unpublished transfer cleanup requested transferId={}", transferId);
+        } catch (IOException | RuntimeException cleanupFailure) {
+            LOGGER.warn("unpublished transfer cleanup failed transferId={}; original publication failure is preserved",
+                    transferId, cleanupFailure);
+            publicationFailure.addSuppressed(cleanupFailure);
         }
     }
 }

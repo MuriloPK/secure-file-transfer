@@ -17,6 +17,14 @@ public interface TransferRepositoryPort {
 
     void publishManifest(TransferManifest manifest) throws IOException;
 
+    /**
+     * Discards objects staged for a transfer that has not started manifest
+     * publication. Implementations must leave the transfer untouched when a
+     * manifest is already available.
+     */
+    default void cleanupUnpublishedTransfer(TransferId transferId) throws IOException {
+    }
+
     InputStream downloadChunk(TransferId transferId, TransferChunk chunk) throws IOException;
 
     TransferManifest downloadManifest(TransferId transferId) throws IOException;

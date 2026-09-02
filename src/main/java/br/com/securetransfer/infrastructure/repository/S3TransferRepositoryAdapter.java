@@ -10,6 +10,8 @@ import br.com.securetransfer.domain.model.TransferManifest;
 import br.com.securetransfer.ports.out.TransferRepositoryPort;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
@@ -21,6 +23,7 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
@@ -52,6 +55,7 @@ import java.util.List;
 @ConditionalOnExpression("'${storage.type:local}'.toLowerCase() matches 'object|s3'")
 public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
     private static final String MANIFEST = "manifest.json";
+    private static final Logger LOGGER = LoggerFactory.getLogger(S3TransferRepositoryAdapter.class);
     private final S3Client client;
     private final ObjectMapper objectMapper;
     private final String bucket;
@@ -113,6 +117,61 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
                         .contentType("application/json")
                         .build(),
                 RequestBody.fromBytes(content));
+    }
+
+    /**
+     * Removes staged chunks after a publication fails before manifest
+     * publication starts. A manifest check is deliberately repeated before
+     * every deletion so this safety boundary is also enforced when callers
+     * invoke the cleanup operation directly.
+     */
+    @Override
+    public void cleanupUnpublishedTransfer(TransferId transferId) throws IOException {
+        if (manifestExistsForCleanup(transferId)) {
+            LOGGER.info("unpublished transfer cleanup skipped transferId={} reason=manifest-present", transferId);
+            return;
+        }
+
+        String prefix = chunkPrefix(transferId);
+        String continuationToken = null;
+        int deleted = 0;
+        do {
+            ListObjectsV2Response page;
+            try {
+                ListObjectsV2Request.Builder request = ListObjectsV2Request.builder()
+                        .bucket(bucket)
+                        .prefix(prefix);
+                if (continuationToken != null) {
+                    request.continuationToken(continuationToken);
+                }
+                page = client.listObjectsV2(request.build());
+            } catch (S3Exception | SdkClientException exception) {
+                throw storageFailure("listar chunks órfãos da transferência " + transferId, exception);
+            }
+
+            for (S3Object object : page.contents()) {
+                if (object.key() == null || !object.key().startsWith(prefix)) {
+                    continue;
+                }
+                if (manifestExistsForCleanup(transferId)) {
+                    LOGGER.info("unpublished transfer cleanup stopped transferId={} deleted={} reason=manifest-present",
+                            transferId, deleted);
+                    return;
+                }
+                try {
+                    client.deleteObject(DeleteObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(object.key())
+                            .build());
+                    deleted++;
+                } catch (S3Exception | SdkClientException exception) {
+                    throw storageFailure("remover chunk órfão da transferência " + transferId, exception);
+                }
+            }
+            continuationToken = Boolean.TRUE.equals(page.isTruncated()) ? page.nextContinuationToken() : null;
+        } while (continuationToken != null && !continuationToken.isBlank());
+
+        LOGGER.info("unpublished transfer cleanup finished transferId={} deleted={}", transferId, deleted);
     }
 
     @Override
@@ -242,6 +301,27 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
 
     private String blobKey(TransferId transferId, TransferChunk chunk) {
         return blobPrefix + "/" + transferId + "/chunks/" + PathSafety.requireSafeFileName(chunk.fileName());
+    }
+
+    private String chunkPrefix(TransferId transferId) {
+        return blobPrefix + "/" + transferId + "/chunks/";
+    }
+
+    private boolean manifestExistsForCleanup(TransferId transferId) throws IOException {
+        try {
+            client.headObject(HeadObjectRequest.builder()
+                    .bucket(bucket)
+                    .key(manifestKey(transferId))
+                    .build());
+            return true;
+        } catch (S3Exception exception) {
+            if (isNotFound(exception)) {
+                return false;
+            }
+            throw storageFailure("verificar manifest da transferência " + transferId, exception);
+        } catch (SdkClientException exception) {
+            throw storageFailure("verificar manifest da transferência " + transferId, exception);
+        }
     }
 
     private TransferId transferIdFromManifestKey(String key) {

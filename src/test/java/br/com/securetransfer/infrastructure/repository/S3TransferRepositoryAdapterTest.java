@@ -19,6 +19,8 @@ import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Object;
@@ -76,6 +78,52 @@ class S3TransferRepositoryAdapterTest {
                         "metadata/" + transferId + "/manifest.json");
         assertThat(requests.getAllValues()).extracting(PutObjectRequest::contentLength)
                 .containsExactly((long) content.length, requests.getAllValues().get(1).contentLength());
+    }
+
+    @Test
+    void removesStagedChunksWhenManifestIsAbsent() throws Exception {
+        S3Client client = mock(S3Client.class);
+        S3TransferRepositoryAdapter adapter = adapter(client);
+        TransferId transferId = TransferId.newId();
+        String prefix = "blobs/" + transferId + "/chunks/";
+
+        when(client.headObject(any(HeadObjectRequest.class))).thenThrow(
+                software.amazon.awssdk.services.s3.model.S3Exception.builder().statusCode(404).build());
+        when(client.listObjectsV2(any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class)))
+                .thenReturn(ListObjectsV2Response.builder()
+                        .contents(
+                                S3Object.builder().key(prefix + "part-00001.bin").build(),
+                                S3Object.builder().key(prefix + "part-00002.bin").build())
+                        .build());
+
+        adapter.cleanupUnpublishedTransfer(transferId);
+
+        ArgumentCaptor<software.amazon.awssdk.services.s3.model.DeleteObjectRequest> deletes =
+                ArgumentCaptor.forClass(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class);
+        verify(client, org.mockito.Mockito.times(2)).deleteObject(deletes.capture());
+        assertThat(deletes.getAllValues()).extracting(
+                        software.amazon.awssdk.services.s3.model.DeleteObjectRequest::key)
+                .containsExactly(prefix + "part-00001.bin", prefix + "part-00002.bin");
+        ArgumentCaptor<software.amazon.awssdk.services.s3.model.ListObjectsV2Request> lists =
+                ArgumentCaptor.forClass(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class);
+        verify(client).listObjectsV2(lists.capture());
+        assertThat(lists.getValue().prefix()).isEqualTo(prefix);
+    }
+
+    @Test
+    void neverRemovesChunksWhenManifestIsPresent() throws Exception {
+        S3Client client = mock(S3Client.class);
+        S3TransferRepositoryAdapter adapter = adapter(client);
+        TransferId transferId = TransferId.newId();
+        when(client.headObject(any(HeadObjectRequest.class))).thenReturn(HeadObjectResponse.builder().build());
+
+        adapter.cleanupUnpublishedTransfer(transferId);
+
+        verify(client).headObject(any(HeadObjectRequest.class));
+        verify(client, org.mockito.Mockito.never()).listObjectsV2(
+                any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class));
+        verify(client, org.mockito.Mockito.never()).deleteObject(
+                any(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class));
     }
 
     @Test

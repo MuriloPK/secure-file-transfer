@@ -225,6 +225,12 @@ chunks foram enviados; por isso, transferências incompletas não aparecem na
 listagem. Downloads continuam validando tamanho e SHA-256 dos chunks, preservam
 chunks válidos para retomada e só entregam o ZIP depois da validação final.
 `storage.s3.metadata-prefix` e `storage.s3.blob-prefix` devem ser diferentes.
+Se uma publicação falhar antes do envio do manifest, o adapter remove
+explicitamente os chunks parciais. A limpeza verifica a ausência do manifest
+antes de cada remoção e para sem alterar os blobs quando o manifest já existe;
+falhas durante o próprio envio do manifest não acionam essa limpeza, pois o
+resultado da operação remota pode ser indeterminado. O total removido e as
+interrupções da limpeza são registrados no log da aplicação.
 
 ### Teste de contrato S3-compatible hospedado
 
