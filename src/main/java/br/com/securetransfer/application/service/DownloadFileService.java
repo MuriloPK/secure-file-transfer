@@ -59,18 +59,32 @@ public class DownloadFileService {
         try {
             for (TransferChunk chunk : manifest.chunks()) {
                 Path cached = downloadDirectory.resolve(chunk.fileName()).normalize();
-                if (!isValidCachedChunk(cached, chunk)) {
+                boolean cachedChunkIsValid;
+                try {
+                    cachedChunkIsValid = isValidCachedChunk(cached, chunk);
+                } catch (IOException exception) {
+                    Files.deleteIfExists(cached);
+                    throw exception;
+                }
+                if (!cachedChunkIsValid) {
                     Files.deleteIfExists(cached);
                     Path incoming = Files.createTempFile(downloadDirectory, "chunk-", ".download");
-                    try (InputStream remote = repository.downloadChunk(transferId, chunk);
-                         var output = Files.newOutputStream(incoming)) {
-                        remote.transferTo(output);
+                    boolean promoted = false;
+                    try {
+                        try (InputStream remote = repository.downloadChunk(transferId, chunk);
+                             var output = Files.newOutputStream(incoming)) {
+                            remote.transferTo(output);
+                        }
+                        if (!isValidCachedChunk(incoming, chunk)) {
+                            throw new ChunkCorruptedException(chunk.number());
+                        }
+                        moveAtomically(incoming, cached);
+                        promoted = true;
+                    } finally {
+                        if (!promoted) {
+                            Files.deleteIfExists(incoming);
+                        }
                     }
-                    if (!isValidCachedChunk(incoming, chunk)) {
-                        Files.deleteIfExists(incoming);
-                        throw new ChunkCorruptedException(chunk.number());
-                    }
-                    moveAtomically(incoming, cached);
                 }
                 progress.onProgress("Baixando", chunk.encryptedSize(),
                         manifest.chunks().stream().mapToLong(TransferChunk::encryptedSize).sum(),

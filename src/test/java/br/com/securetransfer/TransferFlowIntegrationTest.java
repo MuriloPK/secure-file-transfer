@@ -32,6 +32,7 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -151,6 +152,40 @@ class TransferFlowIntegrationTest {
         assertThat(fixture.repository.downloadedChunkNumbers())
                 .containsExactlyElementsOf(IntStream.rangeClosed(1, manifest.totalChunks())
                         .boxed().toList());
+        assertThat(downloaded.getFileName().toString()).isEqualTo(original.getFileName().toString());
+        assertThat(Files.size(downloaded)).isEqualTo(originalSize);
+        assertThat(sha256(fixture.hash, downloaded)).isEqualTo(originalHash);
+        assertThat(Files.mismatch(original, downloaded)).isEqualTo(-1L);
+        assertThat(zipEntryNames(downloaded)).containsExactlyElementsOf(MULTI_ENTRY_NAMES);
+    }
+
+    @Test
+    void redownloadsChunkWithInvalidSha256BeforeResuming(@TempDir Path temp) throws Exception {
+        TransferFixture fixture = fixture(temp);
+        Path original = temp.resolve("arquivo-com-chunk-corrompido.zip");
+        writeDeterministicMultiEntryZip(original, CHUNK_SIZE);
+        Path destination = Files.createDirectory(temp.resolve("destination"));
+
+        long originalSize = Files.size(original);
+        String originalHash = sha256(fixture.hash, original);
+        var manifest = fixture.publisher.publish(original, new NoOpProgressListener());
+        TransferId transferId = new TransferId(manifest.transferId());
+        TransferChunk corruptedChunk = manifest.chunks().get(1);
+        fixture.repository.corruptNextDownload(corruptedChunk.number());
+
+        assertThatThrownBy(() -> fixture.downloader.download(
+                transferId, destination, new NoOpProgressListener()))
+                .isInstanceOf(br.com.securetransfer.domain.exception.ChunkCorruptedException.class);
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactly(1, 2);
+        Path corruptedCache = temp.resolve("work/download")
+                .resolve(transferId.toString())
+                .resolve(corruptedChunk.fileName());
+        assertThat(corruptedCache).doesNotExist();
+
+        Path downloaded = fixture.downloader.download(
+                transferId, destination, new NoOpProgressListener());
+
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactly(1, 2, 2);
         assertThat(downloaded.getFileName().toString()).isEqualTo(original.getFileName().toString());
         assertThat(Files.size(downloaded)).isEqualTo(originalSize);
         assertThat(sha256(fixture.hash, downloaded)).isEqualTo(originalHash);
@@ -360,7 +395,17 @@ class TransferFlowIntegrationTest {
         @Override
         public InputStream downloadChunk(TransferId transferId, TransferChunk chunk) throws IOException {
             downloadedChunkNumbers.add(chunk.number());
-            return delegate.downloadChunk(transferId, chunk);
+            InputStream downloaded = delegate.downloadChunk(transferId, chunk);
+            if (corruptNextChunkNumber != null && corruptNextChunkNumber == chunk.number()) {
+                corruptNextChunkNumber = null;
+                byte[] content;
+                try (downloaded) {
+                    content = downloaded.readAllBytes();
+                }
+                content[0] ^= 1;
+                return new ByteArrayInputStream(content);
+            }
+            return downloaded;
         }
 
         @Override
@@ -380,6 +425,12 @@ class TransferFlowIntegrationTest {
 
         private List<Integer> downloadedChunkNumbers() {
             return List.copyOf(downloadedChunkNumbers);
+        }
+
+        private Integer corruptNextChunkNumber;
+
+        private void corruptNextDownload(int chunkNumber) {
+            corruptNextChunkNumber = chunkNumber;
         }
     }
 
