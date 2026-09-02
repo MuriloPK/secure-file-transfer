@@ -47,3 +47,13 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Secure File Transfer
+target/
+storage/
+work/
+.env
+*.key
+*.secret
+*.tmp
+*.download

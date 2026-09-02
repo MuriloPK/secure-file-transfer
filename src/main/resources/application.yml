@@ -1,0 +1,16 @@
+transfer:
+  max-file-size: 200MB
+  chunk-size: 5MB
+
+storage:
+  path: ./storage
+
+work:
+  path: ./work
+
+crypto:
+  secret-env: TRANSFER_SECRET
+
+logging:
+  level:
+    root: INFO
