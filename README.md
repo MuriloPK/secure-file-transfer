@@ -291,6 +291,17 @@ podem ser ajustados com `SECURE_TRANSFER_S3_TEST_METADATA_PREFIX` e
 diferentes e o bucket deve permitir `PutObject`, `GetObject`, `HeadObject`,
 `ListBucket` e `DeleteObject`. Sem a flag de habilitação, o teste é ignorado.
 
+O repositório também inclui o workflow `S3-compatible contract`, que executa o
+teste em cada atualização de `main`, em tags de release e em dias úteis. O job
+inicia um MinIO descartável, cria o bucket pela cadeia padrão do AWS CLI e
+fornece endpoint, região, path-style e credenciais somente por variáveis de
+ambiente. Para habilitar o workflow, configure os secrets de CI
+`S3_CONTRACT_ACCESS_KEY_ID` e `S3_CONTRACT_SECRET_ACCESS_KEY`; eles devem ser
+credenciais temporárias ou dedicadas ao MinIO do job e nunca devem ser
+adicionados ao código ou aos argumentos do Maven. O teste usa prefixes isolados
+por transferência e remove os objetos temporários no `finally`, inclusive
+quando uma asserção falha.
+
 ## Variáveis de ambiente
 
 | Variável | Obrigatória | Descrição |

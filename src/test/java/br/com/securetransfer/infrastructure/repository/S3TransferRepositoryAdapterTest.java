@@ -332,6 +332,8 @@ class S3TransferRepositoryAdapterTest {
 
             assertThatThrownBy(() -> adapter.downloadManifest(TransferId.newId()))
                     .isInstanceOf(TransferNotFoundException.class);
+            assertThatThrownBy(() -> adapter.downloadChunk(transferId, chunk))
+                    .isInstanceOf(TransferNotFoundException.class);
             adapter.publishChunk(transferId, chunk, source);
             assertThat(adapter.listTransfers()).isEmpty();
 

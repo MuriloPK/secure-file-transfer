@@ -1,0 +1,83 @@
+name: S3-compatible contract
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  schedule:
+    - cron: "17 3 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  s3-contract:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_CONTRACT_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_CONTRACT_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+      MINIO_ROOT_USER: ${{ secrets.S3_CONTRACT_ACCESS_KEY_ID }}
+      MINIO_ROOT_PASSWORD: ${{ secrets.S3_CONTRACT_SECRET_ACCESS_KEY }}
+      MINIO_IMAGE: minio/minio:RELEASE.2024-06-13T22-53-53Z
+      SECURE_TRANSFER_S3_CONTRACT_TEST: "true"
+      SECURE_TRANSFER_S3_TEST_BUCKET: secure-transfer-contract
+      SECURE_TRANSFER_S3_TEST_ENDPOINT: http://127.0.0.1:9000
+      SECURE_TRANSFER_S3_TEST_REGION: us-east-1
+      SECURE_TRANSFER_S3_TEST_PATH_STYLE_ACCESS: "true"
+      SECURE_TRANSFER_S3_TEST_METADATA_PREFIX: contract-metadata
+      SECURE_TRANSFER_S3_TEST_BLOB_PREFIX: contract-blobs
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Start disposable MinIO
+        run: |
+          set -euo pipefail
+          docker run --detach --rm --name secure-transfer-minio \
+            --env MINIO_ROOT_USER \
+            --env MINIO_ROOT_PASSWORD \
+            --publish 9000:9000 \
+            "$MINIO_IMAGE" server /data --address :9000
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs secure-transfer-minio
+          exit 1
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Install AWS CLI
+        run: |
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes awscli
+          fi
+
+      - name: Create disposable contract bucket
+        run: |
+          set -euo pipefail
+          aws s3api create-bucket \
+            --bucket "$SECURE_TRANSFER_S3_TEST_BUCKET" \
+            --endpoint-url "$SECURE_TRANSFER_S3_TEST_ENDPOINT" \
+            --region "$SECURE_TRANSFER_S3_TEST_REGION"
+
+      - name: Run S3-compatible contract test
+        run: ./mvnw -Dtest=S3TransferRepositoryAdapterTest test
+
+      - name: Stop disposable MinIO
+        if: always()
+        run: docker rm --force --volumes secure-transfer-minio >/dev/null 2>&1 || true
