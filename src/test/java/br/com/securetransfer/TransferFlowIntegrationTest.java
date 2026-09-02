@@ -28,11 +28,12 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
-import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
+import java.util.zip.CRC32;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -42,6 +43,9 @@ class TransferFlowIntegrationTest {
     private static final long MAX_FILE_SIZE = 200 * MEBIBYTE;
     private static final long CHUNK_SIZE = 5 * MEBIBYTE;
     private static final int GENERATION_BUFFER_SIZE = 64 * 1024;
+    private static final String ZIP_ENTRY_NAME = "payload.bin";
+    private static final long ZIP_ARCHIVE_OVERHEAD = 30L + ZIP_ENTRY_NAME.length()
+            + 46L + ZIP_ENTRY_NAME.length() + 22L;
 
     @ParameterizedTest(name = "{0} MiB publica e baixa sem carregar o arquivo inteiro")
     @ValueSource(ints = {50, 199, 200})
@@ -49,7 +53,8 @@ class TransferFlowIntegrationTest {
         TransferFixture fixture = fixture(temp);
         Path original = temp.resolve("arquivo-" + sizeInMebibytes + "-mebibytes.zip");
         long originalSize = sizeInMebibytes * MEBIBYTE;
-        writeDeterministicFile(original, originalSize);
+        writeDeterministicZip(original, originalSize);
+        assertValidZip(original, originalSize);
         Path destination = Files.createDirectory(temp.resolve("destination"));
 
         String originalHash = sha256(fixture.hash, original);
@@ -79,7 +84,8 @@ class TransferFlowIntegrationTest {
     void rejectsFilesLargerThanMaximum(long size, @TempDir Path temp) throws Exception {
         TransferFixture fixture = fixture(temp);
         Path original = temp.resolve("arquivo-acima-do-limite.zip");
-        createSparseFile(original, size);
+        writeDeterministicZip(original, size);
+        assertValidZip(original, size);
 
         assertThatThrownBy(() -> fixture.publisher.publish(original, new NoOpProgressListener()))
                 .isInstanceOf(FileTooLargeException.class);
@@ -116,16 +122,50 @@ class TransferFlowIntegrationTest {
         return new TransferFixture(publisher, downloader, repository, hash);
     }
 
-    private static void writeDeterministicFile(Path path, long size) throws Exception {
+    private static void writeDeterministicZip(Path path, long size) throws Exception {
+        long payloadSize = size - ZIP_ARCHIVE_OVERHEAD;
+        if (payloadSize <= 0) {
+            throw new IllegalArgumentException("tamanho insuficiente para um arquivo ZIP");
+        }
+
+        ZipEntry entry = new ZipEntry(ZIP_ENTRY_NAME);
+        entry.setMethod(ZipEntry.STORED);
+        entry.setSize(payloadSize);
+        entry.setCompressedSize(payloadSize);
+        entry.setCrc(crc32OfDeterministicPayload(payloadSize));
+
+        try (OutputStream file = new BufferedOutputStream(Files.newOutputStream(path));
+             ZipOutputStream zip = new ZipOutputStream(file)) {
+            zip.putNextEntry(entry);
+            writeDeterministicPayload(zip, payloadSize);
+            zip.closeEntry();
+        }
+        if (Files.size(path) != size) {
+            throw new AssertionError("o ZIP gerado não tem o tamanho solicitado");
+        }
+    }
+
+    private static long crc32OfDeterministicPayload(long size) {
+        CRC32 crc = new CRC32();
         byte[] buffer = new byte[GENERATION_BUFFER_SIZE];
-        try (OutputStream output = new BufferedOutputStream(Files.newOutputStream(path))) {
-            long offset = 0;
-            while (offset < size) {
-                int length = (int) Math.min(buffer.length, size - offset);
-                fillDeterministicBuffer(buffer, length, offset);
-                output.write(buffer, 0, length);
-                offset += length;
-            }
+        long offset = 0;
+        while (offset < size) {
+            int length = (int) Math.min(buffer.length, size - offset);
+            fillDeterministicBuffer(buffer, length, offset);
+            crc.update(buffer, 0, length);
+            offset += length;
+        }
+        return crc.getValue();
+    }
+
+    private static void writeDeterministicPayload(OutputStream output, long size) throws Exception {
+        byte[] buffer = new byte[GENERATION_BUFFER_SIZE];
+        long offset = 0;
+        while (offset < size) {
+            int length = (int) Math.min(buffer.length, size - offset);
+            fillDeterministicBuffer(buffer, length, offset);
+            output.write(buffer, 0, length);
+            offset += length;
         }
     }
 
@@ -135,11 +175,13 @@ class TransferFlowIntegrationTest {
         }
     }
 
-    private static void createSparseFile(Path path, long size) throws Exception {
-        try (SeekableByteChannel channel = Files.newByteChannel(path,
-                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-            channel.position(size - 1);
-            channel.write(ByteBuffer.wrap(new byte[]{0}));
+    private static void assertValidZip(Path path, long archiveSize) throws Exception {
+        try (ZipFile zip = new ZipFile(path.toFile())) {
+            ZipEntry entry = zip.getEntry(ZIP_ENTRY_NAME);
+            assertThat(entry).isNotNull();
+            assertThat(entry.getMethod()).isEqualTo(ZipEntry.STORED);
+            assertThat(entry.getSize()).isEqualTo(archiveSize - ZIP_ARCHIVE_OVERHEAD);
+            assertThat(entry.getCompressedSize()).isEqualTo(archiveSize - ZIP_ARCHIVE_OVERHEAD);
         }
     }
 
