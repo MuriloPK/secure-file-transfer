@@ -1,2 +1,3 @@
 - [Git publication safety](git-publication-safety.md) — reject dirty clones before operations that may roll back a failed publication.
+- [Git LFS publication tests](git-lfs-publication-tests.md) — simulate rejected pushes from the remote hook so Git LFS's local pre-push hook remains usable.
 - [Object storage availability boundary](object-storage-availability.md) — keep metadata and blobs separate; only a successfully written manifest makes a transfer visible.

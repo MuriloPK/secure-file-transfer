@@ -221,6 +221,41 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void preservesLocalChangeToGeneratedLfsChunkAndRemovesRejectedCommit(@TempDir Path temp) throws Exception {
+        Path remote = createRemoteRepository(temp);
+        Path clone = temp.resolve("clone");
+        StorageProperties properties = propertiesWithLfs(remote, clone);
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var adapter = new GitHubTransferRepositoryAdapter(properties, mapper);
+        adapter.synchronize();
+
+        TransferId transferId = TransferId.newId();
+        byte[] content = "chunk-data".getBytes();
+        TransferChunk chunk = chunk(content, "part-00001.bin");
+        Path source = temp.resolve("chunk.bin");
+        Files.write(source, content);
+        Path chunkPath = clone.resolve("transfers").resolve(transferId.toString())
+                .resolve("chunks").resolve(chunk.fileName());
+        String localChange = "manual chunk edit that must survive the rejected publication";
+        installRemotePushFailureWithConcurrentEdit(remote, chunkPath, localChange);
+
+        assertThatThrownBy(() -> adapter.publishChunk(transferId, chunk, source))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("rollback concluído")
+                .hasMessageContaining("alterações locais")
+                .hasMessageContaining("preservadas no clone")
+                .hasMessageContaining("faça commit ou descarte-as");
+        assertThat(Files.readString(chunkPath)).isEqualTo(localChange);
+        assertThat(clone.resolve(".gitattributes")).doesNotExist();
+        assertThat(adapter.listTransfers()).isEmpty();
+        assertThat(runCapture(clone, "git", "log", "-1", "--pretty=%s")).isEqualTo("seed\n");
+        assertThat(runCapture(clone, "git", "status", "--porcelain", "--untracked-files=all"))
+                .contains("?? transfers/" + transferId + "/chunks/" + chunk.fileName())
+                .doesNotContain(".gitattributes");
+        assertThat(runCapture(remote, "git", "log", "-1", "--pretty=%s", "main")).isEqualTo("seed\n");
+    }
+
+    @Test
     void rejectsBlobAboveConfiguredLimitWithoutExposingRemoteDetails(@TempDir Path temp) throws Exception {
         StorageProperties properties = properties(temp.resolve("remote.git"), temp.resolve("clone"));
         properties.getGit().setMaxBlobSize(DataSize.ofBytes(3));
@@ -541,6 +576,21 @@ class GitHubTransferRepositoryAdapterTest {
     private static void installPushFailureWithConcurrentEdit(Path clone, Path editedFile, String content)
             throws Exception {
         Path hook = clone.resolve(".git/hooks/pre-push");
+        String script = "#!/bin/sh\n"
+                + "set -eu\n"
+                + "printf '%s' " + shellQuote(content) + " > " + shellQuote(editedFile.toAbsolutePath().toString()) + "\n"
+                + "printf '%s\\n' 'simulated concurrent publication failure' >&2\n"
+                + "exit 1\n";
+        Files.writeString(hook, script);
+        Files.setPosixFilePermissions(hook, EnumSet.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.OWNER_EXECUTE));
+    }
+
+    private static void installRemotePushFailureWithConcurrentEdit(Path remote, Path editedFile, String content)
+            throws Exception {
+        Path hook = remote.resolve("hooks/pre-receive");
         String script = "#!/bin/sh\n"
                 + "set -eu\n"
                 + "printf '%s' " + shellQuote(content) + " > " + shellQuote(editedFile.toAbsolutePath().toString()) + "\n"
