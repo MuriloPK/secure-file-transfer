@@ -105,6 +105,8 @@ storage:
     remote:
     branch: main
     max-blob-size: 100MB
+    # reject (padrão) ou lfs para blobs acima de max-blob-size
+    large-blob-strategy: reject
 work:
   path: ./work
 crypto:
@@ -130,6 +132,7 @@ storage:
     remote: git@github.com:organizacao/repositorio-privado.git
     branch: main
     max-blob-size: 100MB
+    large-blob-strategy: lfs
 ```
 
 O remoto pode ser HTTPS com um credential helper do Git ou SSH com uma chave
@@ -138,6 +141,30 @@ tokens como argumento e não registra a saída do Git. Se `storage.path` ainda n
 existir, o adapter clona o remoto; depois, cada publicação sincroniza, envia os
 chunks em commits individuais e envia o manifest no último commit. Listar,
 verificar e baixar executam `git pull --ff-only` antes de ler os arquivos.
+
+### Blobs maiores que o limite do GitHub
+
+O GitHub mantém um limite de aproximadamente 100 MB para cada blob Git. Para
+transferências que precisam de chunks maiores que esse limite, a estratégia
+suportada é **Git LFS**:
+
+1. Instale o Git LFS (`git lfs install`) nos dois computadores.
+2. Configure `storage.git.large-blob-strategy: lfs`.
+3. Ajuste `transfer.max-file-size` e `transfer.chunk-size` conforme o tamanho
+   desejado; `storage.git.max-blob-size` deixa de bloquear chunks nesse modo.
+
+O adapter adiciona `transfers/**/*.bin` ao `.gitattributes`. O histórico Git
+guarda apenas ponteiros LFS; o conteúdo dos chunks é enviado ao armazenamento
+LFS do mesmo remoto e continua sendo lido pela mesma `TransferRepositoryPort`.
+O manifest ainda é publicado por último, e a validação existente de tamanho,
+SHA-256 do chunk, autenticação AES-GCM, tamanho final e SHA-256 do ZIP não muda.
+O servidor Git precisa oferecer Git LFS e a mesma credencial configurada no Git
+é usada para os objetos LFS. A aplicação não recebe nem grava tokens, senhas ou
+o segredo `TRANSFER_SECRET` em configuração, manifests ou histórico.
+
+O modo `reject` mantém o comportamento conservador: qualquer chunk acima de
+`storage.git.max-blob-size` é recusado antes do commit. Ele deve ser usado
+quando o remoto não oferece Git LFS.
 
 ## Variáveis de ambiente
 
@@ -236,12 +263,12 @@ Os hashes devem ser idênticos.
 ### Usando um repositório Git/GitHub autorizado
 
 O limite padrão de cada blob é 100 MB, alinhado ao limite de arquivos do GitHub.
-Chunks maiores são rejeitados antes do commit; rejeições remotas por limite,
-conflitos de push/pull e falhas de autenticação são convertidas em mensagens
-operacionais sem reproduzir a saída do Git. Reduza `git.max-blob-size` se o
-servidor Git tiver um limite menor. Não versione o segredo, `work/` ou arquivos
-originais; para arquivos muito grandes, considere Git LFS ou um adapter de
-objetos.
+No modo `reject`, chunks maiores são rejeitados antes do commit. No modo `lfs`,
+eles são enviados como objetos Git LFS e não entram como blobs no histórico Git.
+Rejeições remotas por limite, conflitos de push/pull e falhas de autenticação são
+convertidas em mensagens operacionais sem reproduzir a saída do Git. Reduza
+`git.max-blob-size` se o servidor Git tiver um limite menor e não oferecer LFS.
+Não versione o segredo, `work/` ou arquivos originais.
 
 ## Testes
 

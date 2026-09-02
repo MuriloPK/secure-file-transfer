@@ -143,6 +143,45 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void publishesLargeChunksAsLfsPointersAndDownloadsThemFromAnotherClone(@TempDir Path temp) throws Exception {
+        Path remote = createRemoteRepository(temp);
+        StorageProperties firstProperties = properties(remote, temp.resolve("clone-a"));
+        firstProperties.getGit().setMaxBlobSize(DataSize.ofBytes(3));
+        firstProperties.getGit().setLargeBlobStrategy(StorageProperties.LargeBlobStrategy.LFS);
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var first = new GitHubTransferRepositoryAdapter(firstProperties, mapper);
+        TransferId transferId = TransferId.newId();
+        byte[] content = "large".getBytes();
+        Path source = temp.resolve("chunk.bin");
+        Files.write(source, content);
+        TransferChunk chunk = new TransferChunk(1, content.length, content.length,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bm9uY2U=", "part-00001.bin");
+
+        first.publishChunk(transferId, chunk, source);
+
+        Path checkedInChunk = firstProperties.getPath().resolve("transfers")
+                .resolve(transferId.toString()).resolve("chunks").resolve(chunk.fileName());
+        assertThat(Files.readAllBytes(checkedInChunk)).containsExactly(content);
+        assertThat(runCapture(firstProperties.getPath(), "git", "show", "HEAD:"
+                + "transfers/" + transferId + "/chunks/" + chunk.fileName()))
+                .startsWith("version https://git-lfs.github.com/spec/v1");
+
+        TransferManifest manifest = new TransferManifest(transferId.value(), "arquivo.zip", content.length,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                content.length, 1, new TransferManifest.EncryptionMetadata("AES/GCM/NoPadding"),
+                List.of(chunk), Instant.now(), TransferStatus.AVAILABLE);
+        first.publishManifest(manifest);
+
+        var second = new GitHubTransferRepositoryAdapter(
+                propertiesWithLfs(remote, temp.resolve("clone-b")), mapper);
+        second.synchronize();
+        try (InputStream downloaded = second.downloadChunk(transferId, chunk)) {
+            assertThat(downloaded.readAllBytes()).containsExactly(content);
+        }
+    }
+
+    @Test
     void rejectsCredentialsEmbeddedInRemoteUrl(@TempDir Path temp) {
         StorageProperties properties = properties(temp.resolve("clone"), temp.resolve("clone"));
         properties.getGit().setRemote("https://user:secret@github.com/org/private.git");
@@ -168,6 +207,13 @@ class GitHubTransferRepositoryAdapterTest {
         properties.setPath(clone);
         properties.getGit().setRemote(remote.toAbsolutePath().toString());
         properties.getGit().setBranch("main");
+        return properties;
+    }
+
+    private static StorageProperties propertiesWithLfs(Path remote, Path clone) {
+        StorageProperties properties = properties(remote, clone);
+        properties.getGit().setLargeBlobStrategy(StorageProperties.LargeBlobStrategy.LFS);
+        properties.getGit().setMaxBlobSize(DataSize.ofBytes(3));
         return properties;
     }
 
@@ -246,6 +292,22 @@ class GitHubTransferRepositoryAdapterTest {
         if (exit != 0) {
             throw new AssertionError("command failed: " + String.join(" ", command) + "\n" + output);
         }
+    }
+
+    private static String runCapture(Path directory, String... command) throws Exception {
+        Process process = new ProcessBuilder(command)
+                .directory(directory.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output;
+        try (InputStream input = process.getInputStream()) {
+            output = new String(input.readAllBytes());
+        }
+        int exit = process.waitFor();
+        if (exit != 0) {
+            throw new AssertionError("command failed: " + String.join(" ", command) + "\n" + output);
+        }
+        return output;
     }
 
     private record PublicationResult(boolean success, Exception failure, GitHubTransferRepositoryAdapter adapter,

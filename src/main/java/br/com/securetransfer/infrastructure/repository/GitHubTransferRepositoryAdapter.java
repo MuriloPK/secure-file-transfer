@@ -36,6 +36,10 @@ import java.util.concurrent.TimeUnit;
 public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
     private static final String TRANSFERS_DIR = "transfers";
     private static final String MANIFEST = "manifest.json";
+    private static final String GIT_ATTRIBUTES = ".gitattributes";
+    private static final String LFS_CHUNK_PATTERN = "transfers/**/*.bin";
+    private static final String LFS_CHUNK_ATTRIBUTES =
+            LFS_CHUNK_PATTERN + " filter=lfs diff=lfs merge=lfs -text";
     private static final String ORIGIN = "origin";
     private static final Duration COMMAND_TIMEOUT = Duration.ofMinutes(2);
 
@@ -54,6 +58,7 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
     @Override
     public void synchronize() throws IOException {
         ensureRepository();
+        ensureLfsAvailable();
         runGit("sincronizar o repositório Git", "pull", "--ff-only", ORIGIN, properties.getBranch());
     }
 
@@ -66,7 +71,8 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         if (Files.size(input) != chunk.encryptedSize()) {
             throw new StorageException("tamanho do chunk criptografado não corresponde ao manifest");
         }
-        if (Files.size(input) > properties.maxBlobSizeBytes()) {
+        boolean usesLfs = properties.getLargeBlobStrategy() == StorageProperties.LargeBlobStrategy.LFS;
+        if (!usesLfs && Files.size(input) > properties.maxBlobSizeBytes()) {
             throw new StorageException("GitHub rejeita arquivos maiores que o limite configurado de "
                     + properties.getMaxBlobSize());
         }
@@ -78,11 +84,18 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
             } else {
                 ensureRepository();
             }
+            boolean lfsAttributesChanged = usesLfs && ensureLfsTracking();
             Path target = chunkPath(transferId, chunk);
             Files.createDirectories(target.getParent());
             Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING);
-            commitAndPush("publicar chunk " + chunk.number() + " da transferência " + transferId,
-                    relativePath(target));
+            if (lfsAttributesChanged) {
+                commitAndPush("configurar Git LFS e publicar chunk " + chunk.number()
+                                + " da transferência " + transferId,
+                        relativePath(target), GIT_ATTRIBUTES);
+            } else {
+                commitAndPush("publicar chunk " + chunk.number() + " da transferência " + transferId,
+                        relativePath(target));
+            }
         } catch (IOException | RuntimeException exception) {
             if (firstChunk) {
                 synchronizedPublishingTransfers.remove(transferId);
@@ -182,9 +195,31 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         if (properties.getMaxBlobSize() == null || properties.maxBlobSizeBytes() <= 0) {
             throw new IllegalArgumentException("storage.git.max-blob-size deve ser positivo");
         }
+        if (properties.getLargeBlobStrategy() == null) {
+            throw new IllegalArgumentException("storage.git.large-blob-strategy é obrigatória");
+        }
         if (properties.getRemote() != null && !properties.getRemote().isBlank()) {
             rejectEmbeddedCredentials(properties.getRemote());
         }
+    }
+
+    private void ensureLfsAvailable() throws IOException {
+        if (properties.getLargeBlobStrategy() == StorageProperties.LargeBlobStrategy.LFS) {
+            runGit("inicializar Git LFS no clone", "lfs", "install", "--local");
+        }
+    }
+
+    private boolean ensureLfsTracking() throws IOException {
+        Path attributes = repositoryRoot.resolve(GIT_ATTRIBUTES).normalize();
+        if (!attributes.startsWith(repositoryRoot)) {
+            throw new IllegalArgumentException("caminho de atributos Git inválido");
+        }
+        if (Files.isRegularFile(attributes)
+                && Files.readAllLines(attributes).stream().anyMatch(LFS_CHUNK_ATTRIBUTES::equals)) {
+            return false;
+        }
+        runGit("configurar chunks para Git LFS", "lfs", "track", LFS_CHUNK_PATTERN);
+        return true;
     }
 
     private void ensureRepository() throws IOException {
@@ -219,11 +254,15 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         return remote;
     }
 
-    private void commitAndPush(String message, String path) throws IOException {
+    private void commitAndPush(String message, String... paths) throws IOException {
         String previousHead = runGitCapture("identificar o commit local antes da publicação", "rev-parse", "HEAD")
                 .trim();
         try {
-            runGit("adicionar arquivo ao commit Git", "add", "--", path);
+            List<String> addCommand = new ArrayList<>();
+            addCommand.add("add");
+            addCommand.add("--");
+            addCommand.addAll(List.of(paths));
+            runGit("adicionar arquivos ao commit Git", addCommand.toArray(String[]::new));
             runGitWithConfiguration("criar commit Git", "commit", "-m", message);
             runGit("enviar alterações ao repositório Git", "push", ORIGIN, properties.getBranch());
         } catch (IOException | RuntimeException exception) {

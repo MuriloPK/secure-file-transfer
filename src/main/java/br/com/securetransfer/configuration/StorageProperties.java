@@ -44,6 +44,7 @@ public class StorageProperties {
         private String remote;
         private String branch = "main";
         private DataSize maxBlobSize = DataSize.ofMegabytes(100);
+        private LargeBlobStrategy largeBlobStrategy = LargeBlobStrategy.REJECT;
 
         public String getRemote() {
             return remote;
@@ -69,8 +70,21 @@ public class StorageProperties {
             this.maxBlobSize = maxBlobSize;
         }
 
+        public LargeBlobStrategy getLargeBlobStrategy() {
+            return largeBlobStrategy;
+        }
+
+        public void setLargeBlobStrategy(LargeBlobStrategy largeBlobStrategy) {
+            this.largeBlobStrategy = largeBlobStrategy;
+        }
+
         public long maxBlobSizeBytes() {
             return maxBlobSize.toBytes();
         }
+    }
+
+    public enum LargeBlobStrategy {
+        REJECT,
+        LFS
     }
 }

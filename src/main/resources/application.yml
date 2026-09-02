@@ -11,6 +11,8 @@ storage:
     remote:
     branch: main
     max-blob-size: 100MB
+    # Use LFS para chunks maiores que max-blob-size (requer git-lfs instalado).
+    large-blob-strategy: reject
 
 work:
   path: ./work
