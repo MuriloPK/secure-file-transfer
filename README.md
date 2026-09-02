@@ -347,15 +347,41 @@ diferentes e o bucket deve permitir `PutObject`, `GetObject`, `HeadObject`,
 ignorado.
 
 O repositório também inclui o workflow `S3-compatible contract`, que executa o
-teste em cada atualização de `main`, em tags de release e em dias úteis. O job
-inicia um MinIO descartável, cria o bucket pela cadeia padrão do AWS CLI e
-fornece endpoint, região, path-style e credenciais somente por variáveis de
-ambiente. Para habilitar o workflow, configure os secrets de CI
+teste em pull requests destinados a `main`, em cada atualização de `main`, em
+tags de release e em dias úteis. O job inicia um MinIO descartável, cria o
+bucket pela cadeia padrão do AWS CLI e fornece endpoint, região, path-style e
+credenciais somente por variáveis de ambiente. Para habilitar o workflow,
+configure os secrets de CI
 `S3_CONTRACT_ACCESS_KEY_ID` e `S3_CONTRACT_SECRET_ACCESS_KEY`; eles devem ser
 credenciais temporárias ou dedicadas ao MinIO do job e nunca devem ser
 adicionados ao código ou aos argumentos do Maven. O teste usa prefixes isolados
 por transferência e remove os objetos temporários no `finally`, inclusive
 quando uma asserção falha.
+
+#### Proteção do caminho de release
+
+O check `S3-compatible contract / s3-contract` é obrigatório para integrar
+alterações em `main` e, portanto, para o caminho protegido de publicação de
+releases. Configure-o no GitHub em **Settings → Branches → Branch protection
+rules** (ou em **Settings → Rules → Rulesets**), criando uma regra/ruleset que
+se aplique à branch `main` e habilitando:
+
+1. **Require a pull request before merging**.
+2. **Require status checks to pass before merging** e o check
+   `S3-compatible contract / s3-contract`.
+3. **Require branches to be up to date before merging**, para que o contrato
+   valide a revisão que será integrada.
+4. Configure o bypass de forma intencional: permita-o somente a administradores
+   se a política exigir uma exceção operacional explícita; habilite **Do not
+   allow bypassing the above settings** se nem administradores puderem ignorar
+   a proteção.
+
+Um resultado `failure`, `cancelled` ou `skipped` (inclusive quando o check não
+é reportado) impede o merge e a publicação pelo caminho protegido. A única
+exceção é um administrador usar explicitamente o bypass permitido pela regra;
+isso deve ser uma decisão operacional registrada. Crie tags de release somente
+depois do merge em `main`; o workflow também executa novamente em cada tag
+`v*`, como verificação final do commit publicado.
 
 ## Variáveis de ambiente
 
