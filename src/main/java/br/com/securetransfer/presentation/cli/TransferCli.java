@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Scanner;
 
@@ -58,22 +59,29 @@ public class TransferCli implements CommandLineRunner {
 
     private void runCommand(String[] args) {
         try {
-            switch (args[0].toLowerCase()) {
+            String[] commandArgs = Arrays.stream(args)
+                    .filter(argument -> !argument.startsWith("--"))
+                    .toArray(String[]::new);
+            if (commandArgs.length == 0) {
+                printUsage();
+                return;
+            }
+            switch (commandArgs[0].toLowerCase()) {
                 case "publish" -> {
-                    requireArgs(args, 2);
-                    TransferManifest manifest = publisher.publish(Path.of(args[1]), new CliProgressListener());
+                    requireArgs(commandArgs, 2);
+                    TransferManifest manifest = publisher.publish(Path.of(commandArgs[1]), new CliProgressListener());
                     printPublished(manifest);
                 }
                 case "list" -> printTransfers(lister.list());
                 case "download" -> {
-                    requireArgs(args, 3);
-                    Path result = downloader.download(TransferId.parse(args[1]), Path.of(args[2]),
+                    requireArgs(commandArgs, 3);
+                    Path result = downloader.download(TransferId.parse(commandArgs[1]), Path.of(commandArgs[2]),
                             new CliProgressListener());
                     System.out.println("Arquivo entregue: " + result);
                 }
                 case "verify" -> {
-                    requireArgs(args, 2);
-                    printManifest(validator.validate(TransferId.parse(args[1])));
+                    requireArgs(commandArgs, 2);
+                    printManifest(validator.validate(TransferId.parse(commandArgs[1])));
                     System.out.println("Manifesto válido.");
                 }
                 default -> printUsage();

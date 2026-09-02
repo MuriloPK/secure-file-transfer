@@ -18,6 +18,7 @@ public class ValidateTransferService {
     }
 
     public TransferManifest validate(TransferId transferId) throws IOException {
+        repository.synchronize();
         TransferManifest manifest = repository.downloadManifest(transferId);
         validator.validate(manifest);
         return manifest;

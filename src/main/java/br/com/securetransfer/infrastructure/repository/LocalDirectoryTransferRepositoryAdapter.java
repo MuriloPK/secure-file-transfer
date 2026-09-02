@@ -9,9 +9,10 @@ import br.com.securetransfer.configuration.StorageProperties;
 import br.com.securetransfer.ports.out.TransferRepositoryPort;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.stereotype.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -24,6 +25,7 @@ import java.util.Comparator;
 import java.util.List;
 
 @Component
+@ConditionalOnProperty(name = "storage.type", havingValue = "local", matchIfMissing = true)
 public class LocalDirectoryTransferRepositoryAdapter implements TransferRepositoryPort {
     private static final Logger LOGGER = LoggerFactory.getLogger(LocalDirectoryTransferRepositoryAdapter.class);
     private static final String TRANSFERS_DIR = "transfers";

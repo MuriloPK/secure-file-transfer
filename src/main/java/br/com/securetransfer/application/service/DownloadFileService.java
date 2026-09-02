@@ -47,6 +47,7 @@ public class DownloadFileService {
     }
 
     public Path download(TransferId transferId, Path destinationDirectory, ProgressListener progress) throws IOException {
+        repository.synchronize();
         TransferManifest manifest = repository.downloadManifest(transferId);
         validator.validate(manifest);
         Path destination = PathSafety.requireExistingDirectory(destinationDirectory);

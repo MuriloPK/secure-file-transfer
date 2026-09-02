@@ -18,6 +18,7 @@ public class ListTransfersService {
     }
 
     public List<TransferManifest> list() throws IOException {
+        repository.synchronize();
         return repository.listTransfers().stream().filter(manifest -> {
             try {
                 validator.validate(manifest);

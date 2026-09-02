@@ -99,7 +99,12 @@ transfer:
   max-file-size: 200MB
   chunk-size: 5MB
 storage:
+  type: local
   path: ./storage
+  git:
+    remote:
+    branch: main
+    max-blob-size: 100MB
 work:
   path: ./work
 crypto:
@@ -113,6 +118,26 @@ java -jar target/secure-file-transfer-1.0.0.jar \
   --storage.path=/mnt/transferencias \
   --transfer.chunk-size=5MB
 ```
+
+Para publicar diretamente em um clone de Git/GitHub, use `storage.type=git` e
+configure o remoto sem credenciais embutidas:
+
+```yaml
+storage:
+  type: git
+  path: ./github-storage
+  git:
+    remote: git@github.com:organizacao/repositorio-privado.git
+    branch: main
+    max-blob-size: 100MB
+```
+
+O remoto pode ser HTTPS com um credential helper do Git ou SSH com uma chave
+carregada no agente. A aplicação desativa prompts interativos, nunca recebe
+tokens como argumento e não registra a saída do Git. Se `storage.path` ainda não
+existir, o adapter clona o remoto; depois, cada publicação sincroniza, envia os
+chunks em commits individuais e envia o manifest no último commit. Listar,
+verificar e baixar executam `git pull --ff-only` antes de ler os arquivos.
 
 ## Variáveis de ambiente
 
@@ -210,12 +235,13 @@ Os hashes devem ser idênticos.
 
 ### Usando um repositório Git/GitHub autorizado
 
-A implementação inicial é deliberadamente desacoplada de GitHub. Para uma
-simulação controlada, `storage.path` pode apontar para uma pasta dentro de um
-clone privado autorizado; o operador faz `git pull` antes de listar/baixar e
-`git add/commit/push` depois de publicar. Não versione o segredo, `work/` ou
-arquivos originais. Para uso frequente, prefira Git LFS ou um adapter dedicado
-de S3/Azure/MinIO, evitando commits grandes no Git comum.
+O limite padrão de cada blob é 100 MB, alinhado ao limite de arquivos do GitHub.
+Chunks maiores são rejeitados antes do commit; rejeições remotas por limite,
+conflitos de push/pull e falhas de autenticação são convertidas em mensagens
+operacionais sem reproduzir a saída do Git. Reduza `git.max-blob-size` se o
+servidor Git tiver um limite menor. Não versione o segredo, `work/` ou arquivos
+originais; para arquivos muito grandes, considere Git LFS ou um adapter de
+objetos.
 
 ## Testes
 
@@ -247,6 +273,10 @@ publicar → storage → baixar → comparação byte a byte e SHA-256.
   a parte inválida.
 - **storage compartilhado indisponível**: confira montagem, permissões e
   `--storage.path`.
+- **falha de GitHub**: confirme que o remoto está correto e que o SSH agent ou
+  credential helper do Git tem acesso ao repositório privado.
+- **conflito no Git**: faça `git pull --ff-only` no clone, resolva alterações
+  locais e tente a operação novamente.
 
 ## Como criar novo adapter de storage
 
@@ -255,6 +285,7 @@ Implemente `TransferRepositoryPort` sem alterar os serviços de aplicação:
 ```text
 publishChunk
 publishManifest
+synchronize
 downloadChunk
 downloadManifest
 listTransfers

@@ -10,6 +10,9 @@ import java.nio.file.Path;
 import java.util.List;
 
 public interface TransferRepositoryPort {
+    default void synchronize() throws IOException {
+    }
+
     void publishChunk(TransferId transferId, TransferChunk chunk, Path source) throws IOException;
 
     void publishManifest(TransferManifest manifest) throws IOException;

@@ -3,7 +3,14 @@ transfer:
   chunk-size: 5MB
 
 storage:
+  type: local
   path: ./storage
+  git:
+    # Para storage.type=git, use SSH ou o credential helper do Git.
+    # Nunca coloque token/senha em remote.
+    remote:
+    branch: main
+    max-blob-size: 100MB
 
 work:
   path: ./work
