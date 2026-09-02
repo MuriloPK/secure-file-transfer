@@ -10,6 +10,7 @@ public class StorageProperties {
     private StorageType type = StorageType.LOCAL;
     private Path path = Path.of("./storage");
     private GitProperties git = new GitProperties();
+    private S3Properties object = new S3Properties();
 
     public StorageType getType() {
         return type;
@@ -35,9 +36,27 @@ public class StorageProperties {
         this.git = git;
     }
 
+    public S3Properties getS3() {
+        return object;
+    }
+
+    public void setS3(S3Properties s3) {
+        this.object = s3;
+    }
+
+    public S3Properties getObject() {
+        return object;
+    }
+
+    public void setObject(S3Properties object) {
+        this.object = object;
+    }
+
     public enum StorageType {
         LOCAL,
-        GIT
+        GIT,
+        OBJECT,
+        S3
     }
 
     public static class GitProperties {
@@ -86,5 +105,62 @@ public class StorageProperties {
     public enum LargeBlobStrategy {
         REJECT,
         LFS
+    }
+
+    public static class S3Properties {
+        private String endpoint;
+        private String bucket;
+        private String region = "us-east-1";
+        private String metadataPrefix = "metadata";
+        private String blobPrefix = "blobs";
+        private boolean pathStyleAccess = true;
+
+        public String getEndpoint() {
+            return endpoint;
+        }
+
+        public void setEndpoint(String endpoint) {
+            this.endpoint = endpoint;
+        }
+
+        public String getBucket() {
+            return bucket;
+        }
+
+        public void setBucket(String bucket) {
+            this.bucket = bucket;
+        }
+
+        public String getRegion() {
+            return region;
+        }
+
+        public void setRegion(String region) {
+            this.region = region;
+        }
+
+        public String getMetadataPrefix() {
+            return metadataPrefix;
+        }
+
+        public void setMetadataPrefix(String metadataPrefix) {
+            this.metadataPrefix = metadataPrefix;
+        }
+
+        public String getBlobPrefix() {
+            return blobPrefix;
+        }
+
+        public void setBlobPrefix(String blobPrefix) {
+            this.blobPrefix = blobPrefix;
+        }
+
+        public boolean isPathStyleAccess() {
+            return pathStyleAccess;
+        }
+
+        public void setPathStyleAccess(boolean pathStyleAccess) {
+            this.pathStyleAccess = pathStyleAccess;
+        }
     }
 }

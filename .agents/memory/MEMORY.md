@@ -1,1 +1,2 @@
 - [Git publication safety](git-publication-safety.md) — reject dirty clones before operations that may roll back a failed publication.
+- [Object storage availability boundary](object-storage-availability.md) — keep metadata and blobs separate; only a successfully written manifest makes a transfer visible.

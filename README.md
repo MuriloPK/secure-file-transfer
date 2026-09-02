@@ -18,7 +18,8 @@ O projeto segue ports and adapters:
 - `domain`: modelos imutáveis, estados e exceções.
 - `application`: casos de uso, chunking, validação, retomada e temporários.
 - `ports`: contratos de criptografia, hash e storage.
-- `infrastructure`: adapters AES-GCM, SHA-256 e diretório local.
+- `infrastructure`: adapters AES-GCM, SHA-256, diretório local e armazenamento
+  de objetos S3-compatible.
 - `presentation`: CLI interativa e comandos não interativos.
 - `configuration`: propriedades tipadas do Spring Boot.
 
@@ -101,6 +102,13 @@ transfer:
 storage:
   type: local
   path: ./storage
+  s3:
+    endpoint:
+    bucket:
+    region: us-east-1
+    metadata-prefix: metadata
+    blob-prefix: blobs
+    path-style-access: true
   git:
     remote:
     branch: main
@@ -165,6 +173,35 @@ o segredo `TRANSFER_SECRET` em configuração, manifests ou histórico.
 O modo `reject` mantém o comportamento conservador: qualquer chunk acima de
 `storage.git.max-blob-size` é recusado antes do commit. Ele deve ser usado
 quando o remoto não oferece Git LFS.
+
+### Armazenamento de objetos sem Git LFS
+
+Para usar um bucket S3 ou compatível com S3 sem colocar blobs no histórico Git,
+configure `storage.type=object`:
+
+```yaml
+storage:
+  type: object
+  s3:
+    endpoint: https://s3.example.com       # opcional na AWS
+    bucket: transferencias
+    region: us-east-1
+    metadata-prefix: metadata
+    blob-prefix: blobs
+    path-style-access: true                # útil para MinIO e endpoints locais
+```
+
+O adapter usa a cadeia padrão de credenciais do AWS SDK: variáveis de ambiente
+do provedor, role da máquina/workload ou profile configurado no ambiente. Não há
+campos de access key ou secret key na configuração. Nunca coloque credenciais na
+URL do endpoint, no repositório ou no manifest.
+
+Os manifests ficam em `metadata/<UUID>/manifest.json` e os chunks criptografados
+em `blobs/<UUID>/chunks/<parte>.bin`. O manifest só é criado depois que todos os
+chunks foram enviados; por isso, transferências incompletas não aparecem na
+listagem. Downloads continuam validando tamanho e SHA-256 dos chunks, preservam
+chunks válidos para retomada e só entregam o ZIP depois da validação final.
+`storage.s3.metadata-prefix` e `storage.s3.blob-prefix` devem ser diferentes.
 
 ## Variáveis de ambiente
 
@@ -302,6 +339,8 @@ publicar → storage → baixar → comparação byte a byte e SHA-256.
   `--storage.path`.
 - **falha de GitHub**: confirme que o remoto está correto e que o SSH agent ou
   credential helper do Git tem acesso ao repositório privado.
+- **falha de armazenamento de objetos**: confirme bucket, região, endpoint e as
+  permissões de leitura/listagem e gravação da credencial fornecida ao SDK.
 - **conflito no Git**: faça `git pull --ff-only` no clone, resolva alterações
   locais e tente a operação novamente.
 
@@ -319,10 +358,10 @@ listTransfers
 exists
 ```
 
-O novo adapter deve manter a regra de publicar o manifest por último, usar
-streaming, validar caminhos e nunca armazenar o segredo. Exemplos futuros:
-`S3TransferRepositoryAdapter`, `AzureBlobTransferRepositoryAdapter`,
-`MinioTransferRepositoryAdapter`, `GitLfsTransferRepositoryAdapter`.
+O `S3TransferRepositoryAdapter` incluído é compatível com AWS S3 e serviços
+S3-compatible, como MinIO. Ele mantém a regra de publicar o manifest por último,
+usa streaming, valida nomes de chunks e nunca armazena credenciais ou o segredo
+de transferência.
 
 ## Estrutura do projeto
 

@@ -5,6 +5,15 @@ transfer:
 storage:
   type: local
   path: ./storage
+  # Para storage.type=object, use um bucket S3 ou compatível com S3.
+  # O SDK resolve credenciais pela cadeia padrão (ambiente, role ou profile).
+  s3:
+    endpoint:
+    bucket:
+    region: us-east-1
+    metadata-prefix: metadata
+    blob-prefix: blobs
+    path-style-access: true
   git:
     # Para storage.type=git, use SSH ou o credential helper do Git.
     # Nunca coloque token/senha em remote.
