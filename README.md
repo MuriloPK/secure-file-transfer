@@ -89,6 +89,8 @@ java -jar target/secure-file-transfer-1.0.0.jar publish /caminho/arquivo.zip
 java -jar target/secure-file-transfer-1.0.0.jar list
 java -jar target/secure-file-transfer-1.0.0.jar verify UUID-DA-TRANSFERENCIA
 java -jar target/secure-file-transfer-1.0.0.jar download UUID-DA-TRANSFERENCIA ./downloads
+# Disponível somente com storage.type=object ou storage.type=s3:
+java -jar target/secure-file-transfer-1.0.0.jar --storage.type=object cleanup-orphaned-blobs
 ```
 
 ## Configuração
@@ -307,14 +309,18 @@ interrupções da limpeza são registrados no log da aplicação.
 
 Para recuperar blobs deixados por um encerramento abrupto, o
 `S3TransferRepositoryAdapter` também oferece a varredura explícita
-`cleanupOrphanedBlobs()`. Ela lista apenas chunks com formato de transferência
+`cleanupOrphanedBlobs()`, disponível na CLI pelo comando
+`cleanup-orphaned-blobs`. O comando existe somente quando
+`storage.type` está configurado como `object` ou `s3`; em outros storages ele
+não é oferecido. A operação lista apenas chunks com formato de transferência
 válido, considera órfãos os objetos cuja última alteração é anterior a
 `storage.s3.orphan-retention` e verifica o manifest imediatamente antes de cada
 remoção. Transferências que já ficaram disponíveis são preservadas, e a rotina
 pode ser executada novamente com segurança. O padrão é `24h`; defina um período
 maior que o tempo máximo esperado para uma publicação. A operação registra
-candidatos, remoções, objetos preservados e falhas, além de retornar essas
-contagens para o chamador.
+candidatos, remoções, objetos preservados e falhas, e o comando exibe essas
+quatro contagens. Uma transferência que já possui manifest nunca é removida,
+mesmo que seus chunks sejam antigos ou que a limpeza seja executada novamente.
 
 ### Teste de contrato S3-compatible hospedado
 

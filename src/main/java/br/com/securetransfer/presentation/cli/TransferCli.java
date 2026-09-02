@@ -6,9 +6,12 @@ import br.com.securetransfer.application.service.PublishFileService;
 import br.com.securetransfer.application.service.ValidateTransferService;
 import br.com.securetransfer.domain.model.TransferId;
 import br.com.securetransfer.domain.model.TransferManifest;
+import br.com.securetransfer.infrastructure.repository.S3TransferRepositoryAdapter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
@@ -16,6 +19,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.Scanner;
 
 @Component
@@ -27,13 +31,29 @@ public class TransferCli implements CommandLineRunner {
     private final DownloadFileService downloader;
     private final ListTransfersService lister;
     private final ValidateTransferService validator;
+    private final Optional<S3TransferRepositoryAdapter> orphanedBlobCleaner;
 
     public TransferCli(PublishFileService publisher, DownloadFileService downloader,
                        ListTransfersService lister, ValidateTransferService validator) {
+        this(publisher, downloader, lister, validator, Optional.empty());
+    }
+
+    @Autowired
+    public TransferCli(PublishFileService publisher, DownloadFileService downloader,
+                       ListTransfersService lister, ValidateTransferService validator,
+                       ObjectProvider<S3TransferRepositoryAdapter> orphanedBlobCleanerProvider) {
+        this(publisher, downloader, lister, validator,
+                Optional.ofNullable(orphanedBlobCleanerProvider.getIfAvailable()));
+    }
+
+    TransferCli(PublishFileService publisher, DownloadFileService downloader,
+                ListTransfersService lister, ValidateTransferService validator,
+                Optional<S3TransferRepositoryAdapter> orphanedBlobCleaner) {
         this.publisher = publisher;
         this.downloader = downloader;
         this.lister = lister;
         this.validator = validator;
+        this.orphanedBlobCleaner = orphanedBlobCleaner;
     }
 
     @Override
@@ -84,6 +104,13 @@ public class TransferCli implements CommandLineRunner {
                     printManifest(validator.validate(TransferId.parse(commandArgs[1])));
                     System.out.println("Manifesto válido.");
                 }
+                case "cleanup-orphaned-blobs", "cleanup-orphans", "cleanup" -> {
+                    if (orphanedBlobCleaner.isEmpty()) {
+                        printUsage();
+                        return;
+                    }
+                    printCleanupReport(orphanedBlobCleaner.get().cleanupOrphanedBlobs());
+                }
                 default -> printUsage();
             }
         } catch (Exception exception) {
@@ -114,14 +141,27 @@ public class TransferCli implements CommandLineRunner {
                 System.out.println("Manifesto válido.");
             }
             case "5" -> {
+                if (orphanedBlobCleaner.isPresent()) {
+                    printCleanupReport(orphanedBlobCleaner.get().cleanupOrphanedBlobs());
+                    break;
+                }
                 return false;
+            }
+            case "6" -> {
+                if (orphanedBlobCleaner.isPresent()) {
+                    return false;
+                }
+                System.out.println("Opção inválida.");
             }
             default -> System.out.println("Opção inválida.");
         }
         return true;
     }
 
-    private static void printMenu() {
+    private void printMenu() {
+        String cleanupOption = orphanedBlobCleaner.isPresent()
+                ? "5 - Limpar blobs órfãos\n                6 - Sair"
+                : "5 - Sair";
         System.out.println("""
 
                 ======================================
@@ -131,9 +171,16 @@ public class TransferCli implements CommandLineRunner {
                 2 - Transferências disponíveis
                 3 - Baixar transferência
                 4 - Verificar transferência
-                5 - Sair
-                """);
+                """ + cleanupOption + "\n");
         System.out.print("Escolha: ");
+    }
+
+    private static void printCleanupReport(S3TransferRepositoryAdapter.OrphanedBlobCleanupReport report) {
+        System.out.println("Limpeza de blobs órfãos concluída.");
+        System.out.println("Candidatos: " + report.candidates());
+        System.out.println("Removidos: " + report.removed());
+        System.out.println("Preservados (manifest presente): " + report.preserved());
+        System.out.println("Falhas: " + report.failures());
     }
 
     private static void printPublished(TransferManifest manifest) {
@@ -169,7 +216,11 @@ public class TransferCli implements CommandLineRunner {
         }
     }
 
-    private static void printUsage() {
-        System.out.println("Uso: java -jar secure-file-transfer.jar [publish <arquivo.zip> | list | download <id> <diretório> | verify <id>]");
+    private void printUsage() {
+        String cleanupCommand = orphanedBlobCleaner.isPresent()
+                ? " | cleanup-orphaned-blobs"
+                : "";
+        System.out.println("Uso: java -jar secure-file-transfer.jar [publish <arquivo.zip> | list"
+                + " | download <id> <diretório> | verify <id>" + cleanupCommand + "]");
     }
 }
