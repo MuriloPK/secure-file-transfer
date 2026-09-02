@@ -160,6 +160,45 @@ class TransferFlowIntegrationTest {
     }
 
     @Test
+    void redownloadsChunkAfterInterruptedRemoteRead(@TempDir Path temp) throws Exception {
+        TransferFixture fixture = fixture(temp);
+        Path original = temp.resolve("arquivo-com-leitura-remota-interrompida.zip");
+        writeDeterministicMultiEntryZip(original, CHUNK_SIZE);
+        Path destination = Files.createDirectory(temp.resolve("destination"));
+
+        long originalSize = Files.size(original);
+        String originalHash = sha256(fixture.hash, original);
+        var manifest = fixture.publisher.publish(original, new NoOpProgressListener());
+        TransferId transferId = new TransferId(manifest.transferId());
+        TransferChunk interruptedChunk = manifest.chunks().get(1);
+        fixture.repository.interruptNextDownloadAfterBytes(
+                interruptedChunk.number(), interruptedChunk.encryptedSize() / 2);
+
+        assertThatThrownBy(() -> fixture.downloader.download(
+                transferId, destination, new NoOpProgressListener()))
+                .isInstanceOf(IOException.class);
+
+        Path downloadDirectory = temp.resolve("work/download").resolve(transferId.toString());
+        Path partialChunk = downloadDirectory.resolve(interruptedChunk.fileName());
+        assertThat(partialChunk).doesNotExist();
+        try (var files = Files.list(downloadDirectory)) {
+            assertThat(files.map(path -> path.getFileName().toString())
+                    .filter(name -> name.endsWith(".download"))
+                    .toList()).isEmpty();
+        }
+
+        Path downloaded = fixture.downloader.download(
+                transferId, destination, new NoOpProgressListener());
+
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactly(1, 2, 2);
+        assertThat(downloaded.getFileName().toString()).isEqualTo(original.getFileName().toString());
+        assertThat(Files.size(downloaded)).isEqualTo(originalSize);
+        assertThat(sha256(fixture.hash, downloaded)).isEqualTo(originalHash);
+        assertThat(Files.mismatch(original, downloaded)).isEqualTo(-1L);
+        assertThat(zipEntryNames(downloaded)).containsExactlyElementsOf(MULTI_ENTRY_NAMES);
+    }
+
+    @Test
     void redownloadsChunkWithInvalidSha256BeforeResuming(@TempDir Path temp) throws Exception {
         TransferFixture fixture = fixture(temp);
         Path original = temp.resolve("arquivo-com-chunk-corrompido.zip");
@@ -405,6 +444,10 @@ class TransferFlowIntegrationTest {
                 content[0] ^= 1;
                 return new ByteArrayInputStream(content);
             }
+            if (interruptNextChunkNumber != null && interruptNextChunkNumber == chunk.number()) {
+                interruptNextChunkNumber = null;
+                return new InterruptedInputStream(downloaded, interruptAfterBytes);
+            }
             return downloaded;
         }
 
@@ -428,9 +471,56 @@ class TransferFlowIntegrationTest {
         }
 
         private Integer corruptNextChunkNumber;
+        private Integer interruptNextChunkNumber;
+        private long interruptAfterBytes;
 
         private void corruptNextDownload(int chunkNumber) {
             corruptNextChunkNumber = chunkNumber;
+        }
+
+        private void interruptNextDownloadAfterBytes(int chunkNumber, long bytes) {
+            interruptNextChunkNumber = chunkNumber;
+            interruptAfterBytes = bytes;
+        }
+    }
+
+    private static final class InterruptedInputStream extends InputStream {
+        private final InputStream delegate;
+        private long remaining;
+
+        private InterruptedInputStream(InputStream delegate, long bytesBeforeFailure) {
+            this.delegate = delegate;
+            this.remaining = bytesBeforeFailure;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (remaining == 0) {
+                throw new IOException("leitura remota interrompida");
+            }
+            int value = delegate.read();
+            if (value >= 0) {
+                remaining--;
+            }
+            return value;
+        }
+
+        @Override
+        public int read(byte[] bytes, int offset, int length) throws IOException {
+            if (remaining == 0) {
+                throw new IOException("leitura remota interrompida");
+            }
+            int requested = (int) Math.min((long) length, remaining);
+            int read = delegate.read(bytes, offset, requested);
+            if (read > 0) {
+                remaining -= read;
+            }
+            return read;
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
         }
     }
 
