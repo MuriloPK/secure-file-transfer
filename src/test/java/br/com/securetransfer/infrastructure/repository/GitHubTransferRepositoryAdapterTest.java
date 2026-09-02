@@ -15,8 +15,13 @@ import org.springframework.util.unit.DataSize;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -53,6 +58,70 @@ class GitHubTransferRepositoryAdapterTest {
         try (InputStream downloaded = second.downloadChunk(transferId, chunk)) {
             assertThat(downloaded.readAllBytes()).containsExactly(content);
         }
+    }
+
+    @Test
+    void concurrentClonesDoNotExposeManifestFromRejectedPushAndCanRetry(@TempDir Path temp) throws Exception {
+        Path remote = createRemoteRepository(temp);
+        Path cloneA = temp.resolve("clone-a");
+        Path cloneB = temp.resolve("clone-b");
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var first = new GitHubTransferRepositoryAdapter(properties(remote, cloneA), mapper);
+        var second = new GitHubTransferRepositoryAdapter(properties(remote, cloneB), mapper);
+        first.synchronize();
+        second.synchronize();
+
+        TransferId firstTransfer = TransferId.newId();
+        TransferId secondTransfer = TransferId.newId();
+        byte[] firstContent = "first-clone".getBytes();
+        byte[] secondContent = "second-clone".getBytes();
+        Path firstSource = temp.resolve("first.bin");
+        Path secondSource = temp.resolve("second.bin");
+        Files.write(firstSource, firstContent);
+        Files.write(secondSource, secondContent);
+        TransferChunk firstChunk = chunk(firstContent, "part-00001.bin");
+        TransferChunk secondChunk = chunk(secondContent, "part-00001.bin");
+        TransferManifest firstManifest = manifest(firstTransfer, "first.zip", firstContent, firstChunk);
+        TransferManifest secondManifest = manifest(secondTransfer, "second.zip", secondContent, secondChunk);
+
+        first.publishChunk(firstTransfer, firstChunk, firstSource);
+        second.synchronize();
+        second.publishChunk(secondTransfer, secondChunk, secondSource);
+
+        Path pushBarrier = temp.resolve("push-barrier");
+        Files.createDirectory(pushBarrier);
+        installFirstPushBarrier(cloneA, pushBarrier, "clone-a", "clone-b");
+        installFirstPushBarrier(cloneB, pushBarrier, "clone-b", "clone-a");
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<PublicationResult> firstResult = executor.submit(
+                    () -> publishManifest(first, firstTransfer, firstManifest));
+            Future<PublicationResult> secondResult = executor.submit(
+                    () -> publishManifest(second, secondTransfer, secondManifest));
+            PublicationResult firstPublication = firstResult.get();
+            PublicationResult secondPublication = secondResult.get();
+
+            assertThat(List.of(firstPublication.success(), secondPublication.success()))
+                    .containsExactlyInAnyOrder(true, false);
+            PublicationResult rejected = firstPublication.success() ? secondPublication : firstPublication;
+            assertThat(rejected.failure())
+                    .isInstanceOf(StorageException.class)
+                    .hasMessageContaining("conflito no repositório Git")
+                    .hasMessageContaining("sincronize o clone")
+                    .hasMessageContaining("antes de tentar novamente");
+            assertThat((rejected.adapter()).listTransfers()).isEmpty();
+
+            rejected.adapter().synchronize();
+            rejected.adapter().publishManifest(rejected.manifest());
+        } finally {
+            executor.shutdownNow();
+        }
+
+        var observer = new GitHubTransferRepositoryAdapter(properties(remote, temp.resolve("observer")), mapper);
+        observer.synchronize();
+        assertThat(observer.listTransfers()).extracting(TransferManifest::transferId)
+                .containsExactlyInAnyOrder(firstTransfer.value(), secondTransfer.value());
     }
 
     @Test
@@ -118,6 +187,52 @@ class GitHubTransferRepositoryAdapterTest {
         return remote;
     }
 
+    private static TransferChunk chunk(byte[] content, String fileName) {
+        return new TransferChunk(1, content.length, content.length,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bm9uY2U=", fileName);
+    }
+
+    private static TransferManifest manifest(TransferId transferId, String fileName, byte[] content,
+                                             TransferChunk chunk) {
+        return new TransferManifest(transferId.value(), fileName, content.length,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                content.length, 1, new TransferManifest.EncryptionMetadata("AES/GCM/NoPadding"),
+                List.of(chunk), Instant.now(), TransferStatus.AVAILABLE);
+    }
+
+    private static PublicationResult publishManifest(GitHubTransferRepositoryAdapter adapter, TransferId transferId,
+                                                     TransferManifest manifest) {
+        try {
+            adapter.publishManifest(manifest);
+            return new PublicationResult(true, null, adapter, transferId, manifest);
+        } catch (Exception exception) {
+            return new PublicationResult(false, exception, adapter, transferId, manifest);
+        }
+    }
+
+    private static void installFirstPushBarrier(Path clone, Path barrier, String name, String otherName)
+            throws Exception {
+        Path hook = clone.resolve(".git/hooks/pre-push");
+        String marker = shellQuote(barrier.toAbsolutePath().toString());
+        String script = "#!/bin/sh\n"
+                + "set -eu\n"
+                + "marker=" + marker + "\n"
+                + "if [ ! -f \"$marker/" + name + "-first\" ]; then\n"
+                + "  touch \"$marker/" + name + "-first\"\n"
+                + "  while [ ! -f \"$marker/" + otherName + "-first\" ]; do sleep 0.01; done\n"
+                + "fi\n";
+        Files.writeString(hook, script);
+        Files.setPosixFilePermissions(hook, EnumSet.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.OWNER_EXECUTE));
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
     private static void run(Path directory, String... command) throws Exception {
         Process process = new ProcessBuilder(command)
                 .directory(directory.toFile())
@@ -131,5 +246,9 @@ class GitHubTransferRepositoryAdapterTest {
         if (exit != 0) {
             throw new AssertionError("command failed: " + String.join(" ", command) + "\n" + output);
         }
+    }
+
+    private record PublicationResult(boolean success, Exception failure, GitHubTransferRepositoryAdapter adapter,
+                                     TransferId transferId, TransferManifest manifest) {
     }
 }

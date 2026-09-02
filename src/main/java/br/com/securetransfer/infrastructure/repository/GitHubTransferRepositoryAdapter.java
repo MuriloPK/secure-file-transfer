@@ -220,9 +220,24 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
     }
 
     private void commitAndPush(String message, String path) throws IOException {
-        runGit("adicionar arquivo ao commit Git", "add", "--", path);
-        runGitWithConfiguration("criar commit Git", "commit", "-m", message);
-        runGit("enviar alterações ao repositório Git", "push", ORIGIN, properties.getBranch());
+        String previousHead = runGitCapture("identificar o commit local antes da publicação", "rev-parse", "HEAD")
+                .trim();
+        try {
+            runGit("adicionar arquivo ao commit Git", "add", "--", path);
+            runGitWithConfiguration("criar commit Git", "commit", "-m", message);
+            runGit("enviar alterações ao repositório Git", "push", ORIGIN, properties.getBranch());
+        } catch (IOException | RuntimeException exception) {
+            rollbackFailedPublication(previousHead, exception);
+            throw exception;
+        }
+    }
+
+    private void rollbackFailedPublication(String previousHead, Exception publicationFailure) {
+        try {
+            runGit("remover publicação Git local rejeitada", "reset", "--hard", previousHead);
+        } catch (IOException | RuntimeException rollbackFailure) {
+            publicationFailure.addSuppressed(rollbackFailure);
+        }
     }
 
     private String relativePath(Path path) {
