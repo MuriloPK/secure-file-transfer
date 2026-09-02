@@ -18,6 +18,7 @@ import br.com.securetransfer.infrastructure.repository.LocalDirectoryTransferRep
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.util.unit.DataSize;
@@ -28,8 +29,10 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -44,6 +47,10 @@ class TransferFlowIntegrationTest {
     private static final long CHUNK_SIZE = 5 * MEBIBYTE;
     private static final int GENERATION_BUFFER_SIZE = 64 * 1024;
     private static final String ZIP_ENTRY_NAME = "payload.bin";
+    private static final String MULTI_ENTRY_METADATA_NAME = "metadata.txt";
+    private static final String MULTI_ENTRY_PAYLOAD_NAME = "data/payload.txt";
+    private static final List<String> MULTI_ENTRY_NAMES = List.of(
+            MULTI_ENTRY_METADATA_NAME, MULTI_ENTRY_PAYLOAD_NAME);
     private static final long ZIP_ARCHIVE_OVERHEAD = 30L + ZIP_ENTRY_NAME.length()
             + 46L + ZIP_ENTRY_NAME.length() + 22L;
 
@@ -77,6 +84,31 @@ class TransferFlowIntegrationTest {
         assertThat(Files.size(downloaded)).isEqualTo(originalSize);
         assertThat(sha256(fixture.hash, downloaded)).isEqualTo(originalHash);
         assertThat(Files.mismatch(original, downloaded)).isEqualTo(-1L);
+    }
+
+    @Test
+    void publishesAndDownloadsZipWithMultipleEntries(@TempDir Path temp) throws Exception {
+        TransferFixture fixture = fixture(temp);
+        Path original = temp.resolve("arquivo-com-varios-arquivos.zip");
+        writeDeterministicMultiEntryZip(original);
+        Path destination = Files.createDirectory(temp.resolve("destination"));
+
+        long originalSize = Files.size(original);
+        String originalHash = sha256(fixture.hash, original);
+        var manifest = fixture.publisher.publish(original, new NoOpProgressListener());
+
+        assertThat(manifest.originalSize()).isEqualTo(originalSize);
+        assertThat(manifest.originalSha256()).isEqualTo(originalHash);
+
+        Path downloaded = fixture.downloader.download(
+                new br.com.securetransfer.domain.model.TransferId(manifest.transferId()),
+                destination, new NoOpProgressListener());
+
+        assertThat(downloaded.getFileName().toString()).isEqualTo(original.getFileName().toString());
+        assertThat(Files.size(downloaded)).isEqualTo(originalSize);
+        assertThat(sha256(fixture.hash, downloaded)).isEqualTo(originalHash);
+        assertThat(Files.mismatch(original, downloaded)).isEqualTo(-1L);
+        assertThat(zipEntryNames(downloaded)).containsExactlyElementsOf(MULTI_ENTRY_NAMES);
     }
 
     @ParameterizedTest(name = "{0} bytes acima do limite é rejeitado")
@@ -145,6 +177,31 @@ class TransferFlowIntegrationTest {
         }
     }
 
+    private static void writeDeterministicMultiEntryZip(Path path) throws Exception {
+        byte[] metadata = "name=secure-transfer\nversion=1\n".getBytes(StandardCharsets.UTF_8);
+        byte[] payload = "payload-entry-with-deterministic-content\n".getBytes(StandardCharsets.UTF_8);
+
+        try (OutputStream file = new BufferedOutputStream(Files.newOutputStream(path));
+             ZipOutputStream zip = new ZipOutputStream(file)) {
+            writeStoredEntry(zip, MULTI_ENTRY_METADATA_NAME, metadata);
+            writeStoredEntry(zip, MULTI_ENTRY_PAYLOAD_NAME, payload);
+        }
+    }
+
+    private static void writeStoredEntry(ZipOutputStream zip, String name, byte[] content) throws Exception {
+        CRC32 crc = new CRC32();
+        crc.update(content);
+        ZipEntry entry = new ZipEntry(name);
+        entry.setMethod(ZipEntry.STORED);
+        entry.setTime(0L);
+        entry.setSize(content.length);
+        entry.setCompressedSize(content.length);
+        entry.setCrc(crc.getValue());
+        zip.putNextEntry(entry);
+        zip.write(content);
+        zip.closeEntry();
+    }
+
     private static long crc32OfDeterministicPayload(long size) {
         CRC32 crc = new CRC32();
         byte[] buffer = new byte[GENERATION_BUFFER_SIZE];
@@ -182,6 +239,12 @@ class TransferFlowIntegrationTest {
             assertThat(entry.getMethod()).isEqualTo(ZipEntry.STORED);
             assertThat(entry.getSize()).isEqualTo(archiveSize - ZIP_ARCHIVE_OVERHEAD);
             assertThat(entry.getCompressedSize()).isEqualTo(archiveSize - ZIP_ARCHIVE_OVERHEAD);
+        }
+    }
+
+    private static List<String> zipEntryNames(Path path) throws Exception {
+        try (ZipFile zip = new ZipFile(path.toFile())) {
+            return zip.stream().map(ZipEntry::getName).toList();
         }
     }
 
