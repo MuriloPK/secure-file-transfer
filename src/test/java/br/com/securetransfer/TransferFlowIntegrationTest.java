@@ -160,6 +160,43 @@ class TransferFlowIntegrationTest {
     }
 
     @Test
+    void removesPartialArchiveWhenAssemblyIsInterruptedAndCanRetry(@TempDir Path temp) throws Exception {
+        TransferFixture fixture = fixture(temp);
+        Path original = temp.resolve("arquivo-com-montagem-interrompida.zip");
+        writeDeterministicMultiEntryZip(original, CHUNK_SIZE);
+        Path destination = Files.createDirectory(temp.resolve("destination"));
+
+        long originalSize = Files.size(original);
+        String originalHash = sha256(fixture.hash, original);
+        var manifest = fixture.publisher.publish(original, new NoOpProgressListener());
+        TransferId transferId = new TransferId(manifest.transferId());
+        List<Integer> chunkNumbers = IntStream.rangeClosed(1, manifest.totalChunks()).boxed().toList();
+
+        ProgressListener interruptDuringAssembly = (operation, completed, total, item, totalItems) -> {
+            if ("Montando".equals(operation) && item == 2) {
+                throw new AssemblyInterruptedException();
+            }
+        };
+        assertThatThrownBy(() -> fixture.downloader.download(
+                transferId, destination, interruptDuringAssembly))
+                .isInstanceOf(AssemblyInterruptedException.class);
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactlyElementsOf(chunkNumbers);
+        try (var files = Files.list(destination)) {
+            assertThat(files.toList()).isEmpty();
+        }
+
+        Path downloaded = fixture.downloader.download(
+                transferId, destination, new NoOpProgressListener());
+
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactlyElementsOf(chunkNumbers);
+        assertThat(downloaded.getFileName().toString()).isEqualTo(original.getFileName().toString());
+        assertThat(Files.size(downloaded)).isEqualTo(originalSize);
+        assertThat(sha256(fixture.hash, downloaded)).isEqualTo(originalHash);
+        assertThat(Files.mismatch(original, downloaded)).isEqualTo(-1L);
+        assertThat(zipEntryNames(downloaded)).containsExactlyElementsOf(MULTI_ENTRY_NAMES);
+    }
+
+    @Test
     void redownloadsChunkAfterInterruptedRemoteRead(@TempDir Path temp) throws Exception {
         TransferFixture fixture = fixture(temp);
         Path original = temp.resolve("arquivo-com-leitura-remota-interrompida.zip");
@@ -525,5 +562,8 @@ class TransferFlowIntegrationTest {
     }
 
     private static final class DownloadInterruptedException extends RuntimeException {
+    }
+
+    private static final class AssemblyInterruptedException extends RuntimeException {
     }
 }
