@@ -19,9 +19,12 @@ jobs:
     env:
       SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST: "true"
       SECURE_TRANSFER_GIT_LFS_TEST_REMOTE: ${{ secrets.SECURE_TRANSFER_GIT_LFS_TEST_REMOTE }}
+      SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE || 'ssh' }}
       SECURE_TRANSFER_GIT_LFS_TEST_BRANCH: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_BRANCH }}
       SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES }}
       SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES }}
+      GIT_TERMINAL_PROMPT: "0"
+      GIT_ASKPASS: ""
 
     steps:
       - name: Check out source
@@ -33,6 +36,20 @@ jobs:
           set -euo pipefail
           test -n "$SECURE_TRANSFER_GIT_LFS_TEST_REMOTE" \
             || { echo "::error::configure SECURE_TRANSFER_GIT_LFS_TEST_REMOTE as an environment secret"; exit 1; }
+          case "$SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE" in
+            ssh)
+              case "$SECURE_TRANSFER_GIT_LFS_TEST_REMOTE" in
+                https://*) echo "::error::SSH mode requires an SSH remote"; exit 1 ;;
+              esac
+              ;;
+            https)
+              case "$SECURE_TRANSFER_GIT_LFS_TEST_REMOTE" in
+                https://*) ;;
+                *) echo "::error::HTTPS mode requires an https:// remote"; exit 1 ;;
+              esac
+              ;;
+            *) echo "::error::SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE must be ssh or https"; exit 1 ;;
+          esac
           test -n "$SECURE_TRANSFER_GIT_LFS_TEST_BRANCH" \
             || { echo "::error::configure SECURE_TRANSFER_GIT_LFS_TEST_BRANCH as an environment variable"; exit 1; }
           test -n "$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES" \
@@ -50,6 +67,7 @@ jobs:
             || { echo "::error::chunk size must be at least the configured minimum"; exit 1; }
 
       - name: Configure SSH credentials
+        if: env.SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE == 'ssh'
         shell: bash
         env:
           GIT_LFS_CONTRACT_SSH_PRIVATE_KEY: ${{ secrets.GIT_LFS_CONTRACT_SSH_PRIVATE_KEY }}
@@ -66,8 +84,51 @@ jobs:
           chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
           {
             echo "GIT_SSH_COMMAND=ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
-            echo "GIT_TERMINAL_PROMPT=0"
           } >> "$GITHUB_ENV"
+
+      - name: Configure HTTPS credentials
+        if: env.SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE == 'https'
+        shell: bash
+        env:
+          GIT_LFS_CONTRACT_HTTPS_TOKEN: ${{ secrets.GIT_LFS_CONTRACT_HTTPS_TOKEN }}
+          GIT_LFS_CONTRACT_HTTPS_USERNAME: ${{ vars.GIT_LFS_CONTRACT_HTTPS_USERNAME }}
+        run: |
+          set -euo pipefail
+          test -n "$GIT_LFS_CONTRACT_HTTPS_TOKEN" \
+            || { echo "::error::configure GIT_LFS_CONTRACT_HTTPS_TOKEN as an environment secret"; exit 1; }
+          https_username="${GIT_LFS_CONTRACT_HTTPS_USERNAME:-oauth2}"
+          token_file="$RUNNER_TEMP/git-lfs-contract-https-token"
+          username_file="$RUNNER_TEMP/git-lfs-contract-https-username"
+          helper_file="$RUNNER_TEMP/git-lfs-contract-https-credential-helper"
+          umask 077
+          printf '%s' "$GIT_LFS_CONTRACT_HTTPS_TOKEN" > "$token_file"
+          printf '%s' "$https_username" > "$username_file"
+          cat > "$helper_file" <<'HELPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          token_file="${RUNNER_TEMP}/git-lfs-contract-https-token"
+          username_file="${RUNNER_TEMP}/git-lfs-contract-https-username"
+          case "${1:-}" in
+            get)
+              protocol=""
+              while IFS= read -r line; do
+                [[ -z "$line" ]] && break
+                case "$line" in
+                  protocol=*) protocol="${line#protocol=}" ;;
+                esac
+              done
+              [[ "$protocol" == "https" ]] || exit 0
+              printf 'username=%s\n' "$(cat "$username_file")"
+              printf 'password=%s\n' "$(cat "$token_file")"
+              ;;
+            store|erase) exit 0 ;;
+            *) exit 1 ;;
+          esac
+          HELPER
+          chmod 700 "$helper_file"
+          chmod 600 "$token_file" "$username_file"
+          git config --global credential.helper ""
+          git config --global --add credential.helper "$helper_file"
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -102,8 +163,21 @@ jobs:
             echo "- Result: \`$CONTRACT_RESULT\`"
             echo "- Remote: protected environment secret (redacted)"
             echo "- Branch: \`$SECURE_TRANSFER_GIT_LFS_TEST_BRANCH\`"
+            echo "- Authentication mode: \`$SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE\`"
             echo "- Minimum chunk size validated: \`$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES\` bytes"
             echo "- Chunk size exercised: \`$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES\` bytes"
             echo "- Stages: authentication, LFS pointer publication, manifest publication, listing, download"
-            echo "- Credentials: SSH private key and known hosts supplied by protected environment secrets"
+            echo "- Credentials: SSH key/known hosts or temporary HTTPS credential helper (secret redacted)"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary Git credentials
+        if: always()
+        shell: bash
+        run: |
+          rm -f \
+            "$RUNNER_TEMP/git-lfs-contract-https-credential-helper" \
+            "$RUNNER_TEMP/git-lfs-contract-https-token" \
+            "$RUNNER_TEMP/git-lfs-contract-https-username" \
+            "$HOME/.ssh/id_ed25519" \
+            "$HOME/.ssh/known_hosts"
+          git config --global --unset-all credential.helper >/dev/null 2>&1 || true

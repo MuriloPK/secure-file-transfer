@@ -233,30 +233,39 @@ executa esse contrato manualmente ou em dias úteis, usando um ambiente protegid
 do GitHub Actions chamado `git-lfs-contract`. O remoto e a autenticação nunca
 ficam no repositório:
 
-| Tipo | Nome | Conteúdo |
-| --- | --- | --- |
-| Secret do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_REMOTE` | URL SSH do repositório descartável dedicado ao contrato |
-| Secret do ambiente | `GIT_LFS_CONTRACT_SSH_PRIVATE_KEY` | chave privada SSH do usuário/deploy key com acesso ao remoto |
-| Secret do ambiente | `GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS` | chave(s) de host SSH do provedor |
-| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_BRANCH` | branch descartável usada pelo contrato |
-| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES` | menor chunk que deve ser aceito pelo armazenamento LFS |
-| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES` | tamanho realmente exercitado; deve ser maior ou igual ao mínimo |
+| Tipo                 | Nome                                           | Conteúdo                                                                                       |
+| -------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Secret do ambiente   | `SECURE_TRANSFER_GIT_LFS_TEST_REMOTE`          | URL SSH ou HTTPS, sem usuário, senha ou token, do repositório descartável dedicado ao contrato |
+| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE`       | `ssh` (padrão) ou `https`; deve corresponder ao esquema do remoto                              |
+| Secret do ambiente   | `GIT_LFS_CONTRACT_SSH_PRIVATE_KEY`             | chave privada SSH do usuário/deploy key com acesso ao remoto                                   |
+| Secret do ambiente   | `GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS`             | chave(s) de host SSH do provedor                                                               |
+| Secret do ambiente   | `GIT_LFS_CONTRACT_HTTPS_TOKEN`                 | token para o remoto HTTPS, consumido por um credential helper temporário                       |
+| Variável do ambiente | `GIT_LFS_CONTRACT_HTTPS_USERNAME`              | usuário enviado ao helper HTTPS; opcional, com padrão `oauth2`                                 |
+| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_BRANCH`          | branch descartável usada pelo contrato                                                         |
+| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES` | menor chunk que deve ser aceito pelo armazenamento LFS                                         |
+| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES`     | tamanho realmente exercitado; deve ser maior ou igual ao mínimo                                |
 
 Configure esses valores somente no ambiente protegido, habilite a aprovação
 necessária para ele e dê ao workflow acesso ao ambiente. O remoto deve ser
-dedicado/descartável, ter Git LFS habilitado e usar a sintaxe SSH sem usuário,
-senha ou token embutido na URL. A execução é serializada para que duas execuções
-não publiquem no mesmo repositório ao mesmo tempo.
+dedicado/descartável, ter Git LFS habilitado e usar a sintaxe SSH no modo `ssh`
+ou `https://` no modo `https`, sempre sem usuário, senha ou token embutido na
+URL. Use `ssh` para provedores com deploy keys e known hosts; use `https` quando
+o Git LFS do provedor só estiver disponível por HTTPS ou exigir um token e
+credential helper específico. Nesse modo, o workflow grava o token e o usuário
+somente em arquivos temporários protegidos, e o helper os fornece ao Git/Git
+LFS sem colocar o token na URL, nos logs ou no resumo. A execução é serializada
+para que duas execuções não publiquem no mesmo repositório ao mesmo tempo.
 
 O resumo de cada execução registra o resultado (`success` ou `failure`), a
-branch, o tamanho mínimo validado, o tamanho exercitado e as cinco etapas:
-autenticação, publicação do ponteiro LFS, publicação do manifest, listagem e
-download. Assim, o maior valor configurado que passou é o limite observado para
-essa execução; aumente `SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES` em uma
-execução posterior para verificar uma capacidade maior. O remoto permanece
-redigido no resumo e nos erros do adapter. Uma falha de autenticação não deve
-ser interpretada como falha de capacidade: o nome da etapa e a mensagem
-sanitizada distinguem as duas situações.
+branch, o modo de autenticação, o tamanho mínimo validado, o tamanho exercitado
+e as cinco etapas: autenticação, publicação do ponteiro LFS, publicação do
+manifest, listagem e download. Assim, o maior valor configurado que passou é o
+limite observado para essa execução; aumente
+`SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES` em uma execução posterior para
+verificar uma capacidade maior. O remoto e o token permanecem redigidos no
+resumo e nos erros do adapter. Uma falha de autenticação não deve ser
+interpretada como falha de capacidade: o nome da etapa e a mensagem sanitizada
+distinguem as duas situações.
 
 ### Armazenamento de objetos sem Git LFS
 
