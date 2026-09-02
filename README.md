@@ -248,7 +248,7 @@ ficam no repositório:
 | Tipo                 | Nome                                           | Conteúdo                                                                                       |
 | -------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | Secret do ambiente   | `SECURE_TRANSFER_GIT_LFS_TEST_REMOTE`          | URL SSH ou HTTPS, sem usuário, senha ou token, do repositório descartável dedicado ao contrato |
-| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE`       | `ssh` (padrão) ou `https`; deve corresponder ao esquema do remoto                              |
+| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE`       | `https` (padrão) ou `ssh`; deve corresponder ao esquema do remoto                              |
 | Secret do ambiente   | `GIT_LFS_CONTRACT_SSH_PRIVATE_KEY`             | chave privada SSH do usuário/deploy key com acesso ao remoto                                   |
 | Secret do ambiente   | `GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS`             | chave(s) de host SSH do provedor                                                               |
 | Secret do ambiente   | `GIT_LFS_CONTRACT_HTTPS_TOKEN`                 | token para o remoto HTTPS, consumido por um credential helper temporário                       |
@@ -279,6 +279,34 @@ verificar uma capacidade maior. O remoto e o token permanecem redigidos no
 resumo e nos erros do adapter. Uma falha de autenticação não deve ser
 interpretada como falha de capacidade: o nome da etapa e a mensagem sanitizada
 distinguem as duas situações.
+
+Para a execução protegida que confirma o contrato HTTPS, deixe
+`SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE` ausente ou defina-o como `https`, use
+um remoto `https://` sem qualquer `usuario:senha@` e configure
+`GIT_LFS_CONTRACT_HTTPS_TOKEN` como secret do ambiente. O workflow usa
+`https` por padrão para evitar que uma execução de confirmação caia
+silenciosamente no caminho SSH. O valor de
+`GIT_LFS_CONTRACT_HTTPS_USERNAME` é enviado como o usuário do Basic Auth e o
+token é enviado como a senha, sempre por um helper temporário com permissão
+restrita. Se o provedor exigir um usuário específico, essa variável deve ser
+preenchida; não coloque o usuário na URL.
+
+Requisitos comuns dos provedores para esse modo:
+
+| Provedor | `GIT_LFS_CONTRACT_HTTPS_USERNAME` | Token e permissões mínimas |
+| -------- | -------------------------------- | -------------------------- |
+| GitHub  | login do usuário que criou o token | PAT clássico com `repo`, ou PAT fine-grained com acesso ao repositório e `Contents: Read and write`; Git LFS precisa estar habilitado |
+| GitLab  | `oauth2` (padrão) para PAT; use o usuário indicado pelo provedor para token de projeto | PAT ou project access token com `read_repository` e `write_repository` no projeto |
+| Gitea/Forgejo | nome do usuário ou o usuário indicado pelo tipo de token | token com leitura e escrita no repositório e Git LFS habilitado |
+| Bitbucket Cloud | nome de usuário do workspace, não o e-mail | app password com `Repositories: Read` e `Repositories: Write`; confirme que Git LFS está habilitado |
+
+Os nomes e escopos acima devem corresponder ao tipo de token escolhido no
+provedor. Em particular, um token que só permite leitura autentica o clone,
+mas falha na publicação do ponteiro ou do objeto LFS; o contrato só é
+considerado aprovado quando conclui autenticação, publicação do ponteiro,
+publicação do manifest, listagem e download. Se o provedor usar outro formato
+de usuário ou escopo, registre a exceção nesta tabela e mantenha o token
+somente no secret protegido.
 
 ### Armazenamento de objetos sem Git LFS
 
