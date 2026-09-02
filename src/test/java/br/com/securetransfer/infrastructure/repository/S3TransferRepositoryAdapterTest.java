@@ -22,6 +22,10 @@ import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.ListPartsResponse;
+import software.amazon.awssdk.services.s3.model.ListMultipartUploadsResponse;
+import software.amazon.awssdk.services.s3.model.MultipartUpload;
+import software.amazon.awssdk.services.s3.model.Part;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
@@ -130,7 +134,7 @@ class S3TransferRepositoryAdapterTest {
     }
 
     @Test
-    void abortsMultipartUploadWhenAPartFails(@TempDir Path temp) throws Exception {
+    void retainsMultipartUploadWhenAPartFails(@TempDir Path temp) throws Exception {
         S3Client client = mock(S3Client.class);
         StorageProperties properties = properties();
         properties.getS3().setMultipartThreshold(DataSize.ofMegabytes(5));
@@ -163,12 +167,116 @@ class S3TransferRepositoryAdapterTest {
                 .isInstanceOf(StorageException.class)
                 .hasMessageContaining("multipart");
 
+        verify(client, org.mockito.Mockito.never()).abortMultipartUpload(
+                any(software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest.class));
+        verify(client, org.mockito.Mockito.never()).completeMultipartUpload(any(
+                software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest.class));
+    }
+
+    @Test
+    void resumesMultipartUploadUsingOnlyMissingParts(@TempDir Path temp) throws Exception {
+        S3Client client = mock(S3Client.class);
+        StorageProperties properties = properties();
+        properties.getS3().setMultipartThreshold(DataSize.ofMegabytes(5));
+        properties.getS3().setMultipartPartSize(DataSize.ofMegabytes(5));
+        S3TransferRepositoryAdapter adapter = new S3TransferRepositoryAdapter(properties, mapper, client);
+        TransferId transferId = TransferId.newId();
+        long partSize = 5L * 1024 * 1024;
+        long size = 16L * 1024 * 1024;
+        Path source = temp.resolve("large-chunk.bin");
+        Files.write(source, new byte[(int) size]);
+        TransferChunk chunk = new TransferChunk(1, size, size,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bm9uY2U=", source.getFileName().toString());
+        String key = "blobs/" + transferId + "/chunks/large-chunk.bin";
+
+        when(client.listMultipartUploads(any(
+                software.amazon.awssdk.services.s3.model.ListMultipartUploadsRequest.class)))
+                .thenReturn(ListMultipartUploadsResponse.builder()
+                        .uploads(MultipartUpload.builder().key(key).uploadId("upload-resume").build())
+                        .build());
+        when(client.listParts(any(software.amazon.awssdk.services.s3.model.ListPartsRequest.class)))
+                .thenReturn(ListPartsResponse.builder()
+                        .parts(
+                                Part.builder().partNumber(1).size(partSize).eTag("etag-1").build(),
+                                Part.builder().partNumber(2).size(partSize).eTag("").build(),
+                                Part.builder().partNumber(4).size(size - (3 * partSize)).eTag("etag-4").build())
+                        .build());
+        when(client.uploadPart(any(UploadPartRequest.class), any(RequestBody.class))).thenAnswer(invocation -> {
+            UploadPartRequest request = invocation.getArgument(0);
+            assertThat(request.partNumber()).isIn(2, 3);
+            return software.amazon.awssdk.services.s3.model.UploadPartResponse.builder()
+                    .eTag("etag-" + request.partNumber()).build();
+        });
+
+        adapter.publishChunk(transferId, chunk, source);
+
+        verify(client, org.mockito.Mockito.never()).createMultipartUpload(any(
+                software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest.class));
+        ArgumentCaptor<UploadPartRequest> uploads = ArgumentCaptor.forClass(UploadPartRequest.class);
+        verify(client, org.mockito.Mockito.times(2)).uploadPart(uploads.capture(), any(RequestBody.class));
+        assertThat(uploads.getAllValues()).extracting(UploadPartRequest::partNumber)
+                .containsExactly(2, 3);
+        ArgumentCaptor<software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest> complete =
+                ArgumentCaptor.forClass(software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest.class);
+        verify(client).completeMultipartUpload(complete.capture());
+        assertThat(complete.getValue().uploadId()).isEqualTo("upload-resume");
+        assertThat(complete.getValue().multipartUpload().parts())
+                .extracting(software.amazon.awssdk.services.s3.model.CompletedPart::partNumber)
+                .containsExactly(1, 2, 3, 4);
+        assertThat(complete.getValue().multipartUpload().parts())
+                .extracting(software.amazon.awssdk.services.s3.model.CompletedPart::eTag)
+                .containsExactly("etag-1", "etag-2", "etag-3", "etag-4");
+    }
+
+    @Test
+    void abortsIncompatibleMultipartSessionAndStartsOver(@TempDir Path temp) throws Exception {
+        S3Client client = mock(S3Client.class);
+        StorageProperties properties = properties();
+        properties.getS3().setMultipartThreshold(DataSize.ofMegabytes(5));
+        properties.getS3().setMultipartPartSize(DataSize.ofMegabytes(5));
+        S3TransferRepositoryAdapter adapter = new S3TransferRepositoryAdapter(properties, mapper, client);
+        TransferId transferId = TransferId.newId();
+        long size = 11L * 1024 * 1024;
+        Path source = temp.resolve("large-chunk.bin");
+        Files.write(source, new byte[(int) size]);
+        TransferChunk chunk = new TransferChunk(1, size, size,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bm9uY2U=", source.getFileName().toString());
+        String key = "blobs/" + transferId + "/chunks/large-chunk.bin";
+
+        when(client.listMultipartUploads(any(
+                software.amazon.awssdk.services.s3.model.ListMultipartUploadsRequest.class)))
+                .thenReturn(ListMultipartUploadsResponse.builder()
+                        .uploads(MultipartUpload.builder().key(key).uploadId("incompatible").build())
+                        .build());
+        when(client.listParts(any(software.amazon.awssdk.services.s3.model.ListPartsRequest.class)))
+                .thenReturn(ListPartsResponse.builder()
+                        .parts(Part.builder().partNumber(4).size(1L).eTag("etag-extra").build())
+                        .build());
+        when(client.createMultipartUpload(any(
+                software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest.class)))
+                .thenReturn(software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse.builder()
+                        .uploadId("upload-new").build());
+        when(client.uploadPart(any(UploadPartRequest.class), any(RequestBody.class)))
+                .thenAnswer(invocation -> {
+                    UploadPartRequest request = invocation.getArgument(0);
+                    return software.amazon.awssdk.services.s3.model.UploadPartResponse.builder()
+                            .eTag("etag-" + request.partNumber()).build();
+                });
+
+        adapter.publishChunk(transferId, chunk, source);
+
         ArgumentCaptor<software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest> abort =
                 ArgumentCaptor.forClass(software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest.class);
         verify(client).abortMultipartUpload(abort.capture());
-        assertThat(abort.getValue().uploadId()).isEqualTo("upload-1");
-        verify(client, org.mockito.Mockito.never()).completeMultipartUpload(any(
-                software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest.class));
+        assertThat(abort.getValue().uploadId()).isEqualTo("incompatible");
+        verify(client).createMultipartUpload(any(
+                software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest.class));
+        ArgumentCaptor<UploadPartRequest> uploads = ArgumentCaptor.forClass(UploadPartRequest.class);
+        verify(client, org.mockito.Mockito.times(3)).uploadPart(uploads.capture(), any(RequestBody.class));
+        assertThat(uploads.getAllValues()).extracting(UploadPartRequest::uploadId)
+                .containsOnly("upload-new");
     }
 
     @Test

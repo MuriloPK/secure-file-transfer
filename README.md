@@ -238,6 +238,7 @@ storage:
     metadata-prefix: metadata
     blob-prefix: blobs
     path-style-access: true                # útil para MinIO e endpoints locais
+    multipart-resume-enabled: true         # reutiliza partes multipart confirmadas
     orphan-retention: 24h                  # retenção antes da varredura de órfãos
 ```
 
@@ -256,7 +257,14 @@ Chunks maiores que `storage.s3.multipart-threshold` usam o upload multipart do
 S3, com partes de `storage.s3.multipart-part-size` lidas diretamente do arquivo
 sem carregar o chunk inteiro em memória. O tamanho padrão da parte é 8 MiB e
 deve ser de pelo menos 5 MiB para atender ao contrato do S3. Se uma parte falhar,
-a sessão multipart é abortada e o manifest continua sem ser publicado.
+a sessão multipart válida fica disponível para uma nova tentativa, que lista e
+reutiliza as partes confirmadas. Partes ausentes ou com tamanho/ETag inválido
+são reenviadas; quando o tamanho revela uma mudança de layout, a retomada
+recomeça na primeira parte divergente para não reutilizar offsets incorretos.
+Use `storage.s3.multipart-resume-enabled: false` para desativar
+a descoberta de sessões anteriores. Sessões expiradas ou incompatíveis são
+abortadas e recriadas, e o manifest continua sem ser publicado enquanto o chunk
+não estiver completo.
 Se uma publicação falhar antes do envio do manifest, o adapter remove
 explicitamente os chunks parciais. A limpeza verifica a ausência do manifest
 antes de cada remoção e para sem alterar os blobs quando o manifest já existe;
@@ -301,7 +309,9 @@ export SECURE_TRANSFER_S3_TEST_PATH_STYLE_ACCESS=true
 podem ser ajustados com `SECURE_TRANSFER_S3_TEST_METADATA_PREFIX` e
 `SECURE_TRANSFER_S3_TEST_BLOB_PREFIX`; ambos devem apontar para namespaces
 diferentes e o bucket deve permitir `PutObject`, `GetObject`, `HeadObject`,
-`ListBucket` e `DeleteObject`. Sem a flag de habilitação, o teste é ignorado.
+`ListBucket`, `ListBucketMultipartUploads`, `ListMultipartUploadParts`,
+`AbortMultipartUpload` e `DeleteObject`. Sem a flag de habilitação, o teste é
+ignorado.
 
 O repositório também inclui o workflow `S3-compatible contract`, que executa o
 teste em cada atualização de `main`, em tags de release e em dias úteis. O job

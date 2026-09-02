@@ -18,6 +18,8 @@ storage:
     # em memória. O tamanho da parte precisa respeitar o mínimo do S3.
     multipart-threshold: 100MB
     multipart-part-size: 8MB
+    # Sessões multipart válidas são localizadas e retomadas entre tentativas.
+    multipart-resume-enabled: true
     # Chunks enviados antes de um manifest são descartados explicitamente
     # quando a publicação falha antes de iniciar o envio do manifest.
     # A varredura explícita remove chunks sem manifest mais antigos que este período.

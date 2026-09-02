@@ -117,6 +117,7 @@ public class StorageProperties {
         private boolean pathStyleAccess = true;
         private DataSize multipartThreshold = DataSize.ofMegabytes(100);
         private DataSize multipartPartSize = DataSize.ofMegabytes(8);
+        private boolean multipartResumeEnabled = true;
         private Duration orphanRetention = Duration.ofHours(24);
 
         public String getEndpoint() {
@@ -197,6 +198,14 @@ public class StorageProperties {
 
         public long multipartPartSizeBytes() {
             return multipartPartSize.toBytes();
+        }
+
+        public boolean isMultipartResumeEnabled() {
+            return multipartResumeEnabled;
+        }
+
+        public void setMultipartResumeEnabled(boolean multipartResumeEnabled) {
+            this.multipartResumeEnabled = multipartResumeEnabled;
         }
     }
 }

@@ -34,6 +34,12 @@ import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.ListMultipartUploadsRequest;
+import software.amazon.awssdk.services.s3.model.ListMultipartUploadsResponse;
+import software.amazon.awssdk.services.s3.model.ListPartsRequest;
+import software.amazon.awssdk.services.s3.model.ListPartsResponse;
+import software.amazon.awssdk.services.s3.model.MultipartUpload;
+import software.amazon.awssdk.services.s3.model.Part;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
@@ -54,6 +60,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -83,6 +90,7 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
     private final String blobPrefix;
     private final long multipartThresholdBytes;
     private final long multipartPartSizeBytes;
+    private final boolean multipartResumeEnabled;
     private final Duration orphanRetention;
 
     public S3TransferRepositoryAdapter(StorageProperties storageProperties, ObjectMapper objectMapper) {
@@ -105,6 +113,7 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
         this.multipartThresholdBytes = requirePositiveSize(
                 properties.getMultipartThreshold(), "storage.s3.multipart-threshold");
         this.multipartPartSizeBytes = requireMultipartPartSize(properties.getMultipartPartSize());
+        this.multipartResumeEnabled = properties.isMultipartResumeEnabled();
         this.orphanRetention = requirePositiveDuration(
                 properties.getOrphanRetention(), "storage.s3.orphan-retention");
     }
@@ -137,29 +146,225 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
             throws IOException {
         String key = blobKey(transferId, chunk);
         int expectedParts = numberOfParts(size);
-        String uploadId = null;
+        for (int restart = 0; restart < 2; restart++) {
+            MultipartUploadSession session = null;
+            try {
+                session = findOrCreateMultipartUpload(key, size, expectedParts);
+                List<CompletedPart> completedParts = uploadMissingParts(
+                        session, input, size, expectedParts);
+
+                client.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                        .bucket(bucket)
+                        .key(key)
+                        .uploadId(session.uploadId())
+                        .multipartUpload(CompletedMultipartUpload.builder()
+                                .parts(completedParts)
+                                .build())
+                        .build());
+                return;
+            } catch (S3Exception | SdkClientException exception) {
+                if (session != null && restart == 0 && isInvalidMultipartSession(exception)) {
+                    abortMultipartUpload(bucket, key, session.uploadId(), exception);
+                    LOGGER.info("sessão multipart expirada ou inválida; reiniciando key={}", key);
+                    continue;
+                }
+                throw storageFailure("publicar chunk multipart " + chunk.number(), exception);
+            } catch (UncheckedIOException exception) {
+                throw exception.getCause();
+            } catch (RuntimeException exception) {
+                throw exception;
+            }
+        }
+        throw new StorageException("não foi possível reiniciar o upload multipart do chunk " + chunk.number());
+    }
+
+    private int numberOfParts(long size) {
+        long parts = size / multipartPartSizeBytes
+                + (size % multipartPartSizeBytes == 0 ? 0 : 1);
+        if (parts > MAX_MULTIPART_PARTS) {
+            throw new StorageException("chunk excede o limite de 10.000 partes do upload multipart");
+        }
+        return Math.toIntExact(parts);
+    }
+
+    private MultipartUploadSession findOrCreateMultipartUpload(String key, long size, int expectedParts) {
+        if (multipartResumeEnabled) {
+            MultipartUploadSession resumable = findResumableMultipartUpload(key, size, expectedParts);
+            if (resumable != null) {
+                LOGGER.info("retomando upload multipart key={} uploadId={} partesConfirmadas={}",
+                        key, resumable.uploadId(), resumable.confirmedParts().size());
+                return resumable;
+            }
+        }
+
+        CreateMultipartUploadResponse created;
         try {
-            CreateMultipartUploadResponse created = client.createMultipartUpload(CreateMultipartUploadRequest.builder()
+            created = client.createMultipartUpload(CreateMultipartUploadRequest.builder()
                     .bucket(bucket)
                     .key(key)
                     .contentType("application/octet-stream")
                     .build());
-            uploadId = created.uploadId();
-            if (uploadId == null || uploadId.isBlank()) {
-                throw new StorageException("armazenamento de objetos não retornou o identificador do upload multipart");
+        } catch (S3Exception | SdkClientException exception) {
+            throw storageFailure("iniciar upload multipart", exception);
+        }
+        if (created == null || created.uploadId() == null || created.uploadId().isBlank()) {
+            throw new StorageException("armazenamento de objetos não retornou o identificador do upload multipart");
+        }
+        return new MultipartUploadSession(key, created.uploadId(), Map.of());
+    }
+
+    private MultipartUploadSession findResumableMultipartUpload(String key, long size, int expectedParts) {
+        List<MultipartUpload> candidates = listMultipartUploads(key);
+        List<MultipartUploadSession> valid = new ArrayList<>();
+        for (MultipartUpload candidate : candidates) {
+            if (candidate == null || candidate.uploadId() == null || candidate.uploadId().isBlank()) {
+                continue;
+            }
+            try {
+                Map<Integer, String> confirmedParts = listConfirmedParts(
+                        key, candidate.uploadId(), size, expectedParts);
+                if (confirmedParts != null) {
+                    valid.add(new MultipartUploadSession(key, candidate.uploadId(), confirmedParts));
+                } else {
+                    abortMultipartUpload(bucket, key, candidate.uploadId(),
+                            new StorageException("partes incompatíveis com o chunk atual"));
+                }
+            } catch (S3Exception | SdkClientException exception) {
+                if (!isInvalidMultipartSession(exception)) {
+                    throw storageFailure("inspecionar upload multipart existente", exception);
+                }
+                abortMultipartUpload(bucket, key, candidate.uploadId(), exception);
+            }
+        }
+
+        if (valid.isEmpty()) {
+            return null;
+        }
+        MultipartUploadSession selected = valid.get(0);
+        for (int index = 1; index < valid.size(); index++) {
+            MultipartUploadSession duplicate = valid.get(index);
+            abortMultipartUpload(bucket, key, duplicate.uploadId(),
+                    new StorageException("sessão multipart duplicada"));
+        }
+        return selected;
+    }
+
+    private List<MultipartUpload> listMultipartUploads(String key) {
+        List<MultipartUpload> uploads = new ArrayList<>();
+        String keyMarker = null;
+        String uploadIdMarker = null;
+        do {
+            ListMultipartUploadsRequest.Builder request = ListMultipartUploadsRequest.builder()
+                    .bucket(bucket)
+                    .prefix(key);
+            if (keyMarker != null) {
+                request.keyMarker(keyMarker);
+            }
+            if (uploadIdMarker != null) {
+                request.uploadIdMarker(uploadIdMarker);
             }
 
-            List<CompletedPart> completedParts = new ArrayList<>(expectedParts);
-            long remaining = size;
-            long offset = 0;
-            for (int partNumber = 1; remaining > 0; partNumber++) {
-                long partSize = Math.min(multipartPartSizeBytes, remaining);
+            ListMultipartUploadsResponse page;
+            try {
+                page = client.listMultipartUploads(request.build());
+            } catch (S3Exception | SdkClientException exception) {
+                throw storageFailure("listar uploads multipart existentes", exception);
+            }
+            if (page == null) {
+                return uploads;
+            }
+            if (page.uploads() != null) {
+                for (MultipartUpload upload : page.uploads()) {
+                    if (upload != null && key.equals(upload.key())) {
+                        uploads.add(upload);
+                    }
+                }
+            }
+            keyMarker = Boolean.TRUE.equals(page.isTruncated()) ? page.nextKeyMarker() : null;
+            uploadIdMarker = Boolean.TRUE.equals(page.isTruncated()) ? page.nextUploadIdMarker() : null;
+        } while (keyMarker != null || uploadIdMarker != null);
+        uploads.sort(Comparator.comparing(
+                MultipartUpload::initiated,
+                Comparator.nullsLast(Comparator.reverseOrder())));
+        return uploads;
+    }
+
+    /**
+     * Lists all parts because the S3 API returns at most 1,000 parts per page.
+     * A null result is treated as an empty list for compatibility with simple
+     * S3 test doubles; real SDK responses are never null.
+     */
+    private Map<Integer, String> listConfirmedParts(
+            String key, String uploadId, long size, int expectedParts) {
+        Map<Integer, String> confirmed = new HashMap<>();
+        Integer partNumberMarker = null;
+        boolean incompatible = false;
+        int firstPartWithInvalidLayout = expectedParts + 1;
+        do {
+            ListPartsRequest.Builder request = ListPartsRequest.builder()
+                    .bucket(bucket)
+                    .key(key)
+                    .uploadId(uploadId);
+            if (partNumberMarker != null) {
+                request.partNumberMarker(partNumberMarker);
+            }
+
+            ListPartsResponse page;
+            try {
+                page = client.listParts(request.build());
+            } catch (S3Exception | SdkClientException exception) {
+                throw exception;
+            }
+            if (page == null) {
+                return confirmed;
+            }
+            if (page.parts() != null) {
+                for (Part part : page.parts()) {
+                    if (part == null || part.partNumber() == null
+                            || part.partNumber() < 1 || part.partNumber() > expectedParts) {
+                        incompatible = true;
+                        continue;
+                    }
+                    long expectedPartSize = expectedPartSize(size, part.partNumber());
+                    if (part.size() == null || part.size() != expectedPartSize) {
+                        firstPartWithInvalidLayout = Math.min(
+                                firstPartWithInvalidLayout, part.partNumber());
+                        continue;
+                    }
+                    if (part.eTag() == null || part.eTag().isBlank()) {
+                        continue;
+                    }
+                    if (part.partNumber() < firstPartWithInvalidLayout) {
+                        confirmed.put(part.partNumber(), part.eTag());
+                    }
+                }
+            }
+            partNumberMarker = Boolean.TRUE.equals(page.isTruncated())
+                    ? page.nextPartNumberMarker() : null;
+        } while (partNumberMarker != null);
+
+        if (incompatible) {
+            return null;
+        }
+        int layoutBoundary = firstPartWithInvalidLayout;
+        confirmed.entrySet().removeIf(entry -> entry.getKey() >= layoutBoundary);
+        return confirmed;
+    }
+
+    private List<CompletedPart> uploadMissingParts(
+            MultipartUploadSession session, Path input, long size, int expectedParts) {
+        List<CompletedPart> completedParts = new ArrayList<>(expectedParts);
+        long offset = 0;
+        for (int partNumber = 1; partNumber <= expectedParts; partNumber++) {
+            long partSize = expectedPartSize(size, partNumber);
+            String eTag = session.confirmedParts().get(partNumber);
+            if (eTag == null) {
                 long partOffset = offset;
                 UploadPartResponse uploaded = client.uploadPart(
                         UploadPartRequest.builder()
                                 .bucket(bucket)
-                                .key(key)
-                                .uploadId(uploadId)
+                                .key(session.key())
+                                .uploadId(session.uploadId())
                                 .partNumber(partNumber)
                                 .contentLength(partSize)
                                 .build(),
@@ -171,43 +376,41 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
                     throw new StorageException("armazenamento de objetos não retornou o ETag da parte "
                             + partNumber);
                 }
-                completedParts.add(CompletedPart.builder()
-                        .partNumber(partNumber)
-                        .eTag(uploaded.eTag())
-                        .build());
-                remaining -= partSize;
-                offset += partSize;
+                eTag = uploaded.eTag();
+                LOGGER.debug("parte multipart enviada key={} uploadId={} partNumber={}",
+                        session.key(), session.uploadId(), partNumber);
             }
-
-            client.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
-                    .bucket(bucket)
-                    .key(key)
-                    .uploadId(uploadId)
-                    .multipartUpload(CompletedMultipartUpload.builder()
-                            .parts(completedParts)
-                            .build())
+            completedParts.add(CompletedPart.builder()
+                    .partNumber(partNumber)
+                    .eTag(eTag)
                     .build());
-        } catch (S3Exception | SdkClientException exception) {
-            StorageException failure = storageFailure("publicar chunk multipart " + chunk.number(), exception);
-            abortMultipartUpload(bucket, key, uploadId, failure);
-            throw failure;
-        } catch (UncheckedIOException exception) {
-            IOException failure = exception.getCause();
-            abortMultipartUpload(bucket, key, uploadId, failure);
-            throw failure;
-        } catch (RuntimeException exception) {
-            abortMultipartUpload(bucket, key, uploadId, exception);
-            throw exception;
+            offset += partSize;
         }
+        return completedParts;
     }
 
-    private int numberOfParts(long size) {
-        long parts = size / multipartPartSizeBytes
-                + (size % multipartPartSizeBytes == 0 ? 0 : 1);
-        if (parts > MAX_MULTIPART_PARTS) {
-            throw new StorageException("chunk excede o limite de 10.000 partes do upload multipart");
+    private long expectedPartSize(long size, int partNumber) {
+        long offset = (long) (partNumber - 1) * multipartPartSizeBytes;
+        return Math.min(multipartPartSizeBytes, size - offset);
+    }
+
+    private static boolean isInvalidMultipartSession(Throwable exception) {
+        if (!(exception instanceof S3Exception s3Exception)) {
+            return false;
         }
-        return Math.toIntExact(parts);
+        String errorCode = s3Exception.awsErrorDetails() == null
+                ? null : s3Exception.awsErrorDetails().errorCode();
+        return s3Exception.statusCode() == 404
+                || "NoSuchUpload".equalsIgnoreCase(errorCode)
+                || "InvalidPart".equalsIgnoreCase(errorCode)
+                || "InvalidPartOrder".equalsIgnoreCase(errorCode)
+                || "EntityTooSmall".equalsIgnoreCase(errorCode);
+    }
+
+    private record MultipartUploadSession(String key, String uploadId, Map<Integer, String> confirmedParts) {
+        private MultipartUploadSession {
+            confirmedParts = Map.copyOf(confirmedParts);
+        }
     }
 
     private void abortMultipartUpload(String bucket, String key, String uploadId, Throwable failure) {

@@ -13,6 +13,11 @@ public interface TransferRepositoryPort {
     default void synchronize() throws IOException {
     }
 
+    /**
+     * Publishes a chunk. Object-backed implementations may retain a valid
+     * multipart session after a recoverable failure so a later invocation can
+     * continue it without retransmitting confirmed parts.
+     */
     void publishChunk(TransferId transferId, TransferChunk chunk, Path source) throws IOException;
 
     void publishManifest(TransferManifest manifest) throws IOException;
