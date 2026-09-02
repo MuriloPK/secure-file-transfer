@@ -33,7 +33,9 @@ class GitHubTransferRepositoryAdapterTest {
     private static final String LFS_CONTRACT_REMOTE = "SECURE_TRANSFER_GIT_LFS_TEST_REMOTE";
     private static final String LFS_CONTRACT_BRANCH = "SECURE_TRANSFER_GIT_LFS_TEST_BRANCH";
     private static final String LFS_CONTRACT_CHUNK_BYTES = "SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES";
-    private static final long GITHUB_BLOB_LIMIT_BYTES = 100L * 1024 * 1024;
+    private static final String LFS_CONTRACT_MIN_CHUNK_BYTES =
+            "SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES";
+    private static final long DEFAULT_MIN_CHUNK_BYTES = 100L * 1024 * 1024 + 1;
 
     @Test
     void publishesChunksBeforeManifestAndSynchronizesASecondClone(@TempDir Path temp) throws Exception {
@@ -251,9 +253,10 @@ class GitHubTransferRepositoryAdapterTest {
                 "contrato Git LFS hospedado desabilitado");
         String remote = requiredEnvironment(LFS_CONTRACT_REMOTE);
         String branch = environmentOrDefault(LFS_CONTRACT_BRANCH, "main");
+        long minimumChunkBytes = configuredMinimumChunkBytes();
         long chunkBytes = configuredChunkBytes();
-        assumeTrue(chunkBytes > GITHUB_BLOB_LIMIT_BYTES,
-                "o tamanho do chunk do contrato deve exceder 100 MiB");
+        assumeTrue(chunkBytes >= minimumChunkBytes,
+                "o tamanho do chunk do contrato deve ser pelo menos o mínimo configurado");
 
         ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
         Path source = temp.resolve("hosted-lfs-chunk.bin");
@@ -313,6 +316,7 @@ class GitHubTransferRepositoryAdapterTest {
                 "enviar objetos LFS", providerResponse);
         assertThat(authenticationMessage)
                 .contains("autenticação")
+                .contains("Git")
                 .doesNotContain("provider-secret")
                 .doesNotContain("github.example.invalid");
 
@@ -323,6 +327,15 @@ class GitHubTransferRepositoryAdapterTest {
                 .contains("indisponível")
                 .doesNotContain("provider-internal-details")
                 .doesNotContain("HTTP 503");
+
+        String gitLabAuthenticationResponse = "remote: HTTP Basic: Access denied for "
+                + "https://gitlab.example.invalid/group/repo.git (provider-secret)";
+        String gitLabAuthenticationMessage = GitHubTransferRepositoryAdapter.classifyFailure(
+                "enviar objetos LFS", gitLabAuthenticationResponse);
+        assertThat(gitLabAuthenticationMessage)
+                .contains("autenticação")
+                .doesNotContain("provider-secret")
+                .doesNotContain("gitlab.example.invalid");
     }
 
     @Test
@@ -356,7 +369,7 @@ class GitHubTransferRepositoryAdapterTest {
         properties.setPath(clone);
         properties.getGit().setRemote(remote);
         properties.getGit().setBranch(branch);
-        properties.getGit().setMaxBlobSize(DataSize.ofBytes(GITHUB_BLOB_LIMIT_BYTES));
+        properties.getGit().setMaxBlobSize(DataSize.ofBytes(DEFAULT_MIN_CHUNK_BYTES - 1));
         properties.getGit().setLargeBlobStrategy(StorageProperties.LargeBlobStrategy.LFS);
         return properties;
     }
@@ -377,12 +390,29 @@ class GitHubTransferRepositoryAdapterTest {
     private static long configuredChunkBytes() {
         String value = System.getenv(LFS_CONTRACT_CHUNK_BYTES);
         if (value == null || value.isBlank()) {
-            return GITHUB_BLOB_LIMIT_BYTES + 1;
+            return DEFAULT_MIN_CHUNK_BYTES;
         }
         try {
             return Long.parseLong(value);
         } catch (NumberFormatException exception) {
             throw new IllegalArgumentException(LFS_CONTRACT_CHUNK_BYTES + " deve ser um número inteiro", exception);
+        }
+    }
+
+    private static long configuredMinimumChunkBytes() {
+        String value = System.getenv(LFS_CONTRACT_MIN_CHUNK_BYTES);
+        if (value == null || value.isBlank()) {
+            return DEFAULT_MIN_CHUNK_BYTES;
+        }
+        try {
+            long minimum = Long.parseLong(value);
+            if (minimum <= 0) {
+                throw new IllegalArgumentException(LFS_CONTRACT_MIN_CHUNK_BYTES + " deve ser positivo");
+            }
+            return minimum;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(
+                    LFS_CONTRACT_MIN_CHUNK_BYTES + " deve ser um número inteiro", exception);
         }
     }
 

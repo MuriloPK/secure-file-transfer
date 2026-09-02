@@ -131,13 +131,13 @@ java -jar target/secure-file-transfer-1.0.0.jar \
   --transfer.chunk-size=5MB
 ```
 
-Para publicar diretamente em um clone de Git/GitHub, use `storage.type=git` e
+Para publicar diretamente em um clone de Git hospedado, use `storage.type=git` e
 configure o remoto sem credenciais embutidas:
 
 ```yaml
 storage:
   type: git
-  path: ./github-storage
+  path: ./git-storage
   git:
     remote: git@github.com:organizacao/repositorio-privado.git
     branch: main
@@ -152,11 +152,11 @@ existir, o adapter clona o remoto; depois, cada publicação sincroniza, envia o
 chunks em commits individuais e envia o manifest no último commit. Listar,
 verificar e baixar executam `git pull --ff-only` antes de ler os arquivos.
 
-### Blobs maiores que o limite do GitHub
+### Blobs maiores que o limite do servidor Git
 
-O GitHub mantém um limite de aproximadamente 100 MB para cada blob Git. Para
-transferências que precisam de chunks maiores que esse limite, a estratégia
-suportada é **Git LFS**:
+Servidores Git hospedados podem ter limites diferentes para blobs Git comuns.
+Para transferências que precisam de chunks maiores que o limite do servidor,
+a estratégia suportada é **Git LFS**:
 
 1. Instale o Git LFS (`git lfs install`) nos dois computadores.
 2. Configure `storage.git.large-blob-strategy: lfs`.
@@ -168,31 +168,55 @@ guarda apenas ponteiros LFS; o conteúdo dos chunks é enviado ao armazenamento
 LFS do mesmo remoto e continua sendo lido pela mesma `TransferRepositoryPort`.
 O manifest ainda é publicado por último, e a validação existente de tamanho,
 SHA-256 do chunk, autenticação AES-GCM, tamanho final e SHA-256 do ZIP não muda.
-O servidor Git precisa oferecer Git LFS e a mesma credencial configurada no Git
-é usada para os objetos LFS. A aplicação não recebe nem grava tokens, senhas ou
+O servidor Git precisa oferecer Git LFS. O cliente Git LFS descobre o endpoint
+do provedor a partir do remoto Git e da configuração do próprio clone; não há
+um endpoint específico de GitHub no adapter. Dependendo do provedor, Git e Git
+LFS podem exigir credenciais ou escopos diferentes. Configure isso no SSH agent,
+credential helper, configuração do Git ou mecanismo equivalente do provedor,
+sempre fora do repositório. A aplicação não recebe nem grava tokens, senhas ou
 o segredo `TRANSFER_SECRET` em configuração, manifests ou histórico.
 
 O modo `reject` mantém o comportamento conservador: qualquer chunk acima de
 `storage.git.max-blob-size` é recusado antes do commit. Ele deve ser usado
 quando o remoto não oferece Git LFS.
 
-### Teste de contrato Git LFS hospedado
+### Teste de contrato Git LFS hospedado em provedores compatíveis
 
 Os testes locais usam um repositório bare e não validam a autenticação nem o
-armazenamento LFS do provedor. O teste de contrato hospedado é opt-in, publica
-um chunk padrão de 100 MiB + 1 byte, confirma que o histórico contém apenas o
-ponteiro LFS e valida listagem e download em um segundo clone:
+armazenamento LFS do provedor. O mesmo teste de contrato hospedado pode apontar
+para GitHub, GitLab, Gitea/Forgejo, Bitbucket ou outro servidor compatível sem
+alterar o código de produção. Ele é opt-in, publica um chunk grande, confirma
+que o histórico contém apenas o ponteiro LFS e valida autenticação, listagem e
+download em um segundo clone:
 
 ```bash
 export SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST=true
 export SECURE_TRANSFER_GIT_LFS_TEST_REMOTE='git@github.com:organizacao/repositorio-lfs-de-teste.git'
-# Opcional: branch diferente de main ou um tamanho maior que 100 MiB.
+# Opcional: branch diferente de main ou tamanho mínimo diferente da capacidade
+# do provedor. O padrão é 100 MiB + 1 byte.
 export SECURE_TRANSFER_GIT_LFS_TEST_BRANCH=main
+export SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES=104857601
+./mvnw -Dtest=GitHubTransferRepositoryAdapterTest test
+```
+
+Por exemplo, para executar o mesmo contrato em um GitLab, Gitea ou Forgejo
+dedicado, altere somente o remoto e, se necessário, o tamanho mínimo:
+
+```bash
+export SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST=true
+export SECURE_TRANSFER_GIT_LFS_TEST_REMOTE='git@gitlab.com:organizacao/repositorio-lfs-de-teste.git'
+export SECURE_TRANSFER_GIT_LFS_TEST_BRANCH=main
+# Use um valor aceito pelo limite de LFS do provedor e acima do limite
+# de blob Git que se deseja validar.
+export SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES=52428801
 ./mvnw -Dtest=GitHubTransferRepositoryAdapterTest test
 ```
 
 Use um repositório descartável/dedicado com Git LFS habilitado e configure a
-credencial pelo SSH agent ou por um credential helper do Git antes de executar.
+credencial e as permissões de Git LFS pelo SSH agent, credential helper ou
+mecanismo específico do provedor antes de executar. Alguns provedores separam
+o endpoint ou o escopo de autenticação do Git LFS; essa diferença é resolvida
+na configuração do cliente Git, não por uma credencial no teste.
 O remoto não pode conter usuário, senha ou token; o teste não recebe credenciais
 por argumento, não imprime a URL nem a saída do provedor e fica ignorado quando
 `SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST` não é `true`. O branch, o clone
@@ -361,9 +385,9 @@ sha256sum arquivo-original.zip arquivo-baixado.zip
 
 Os hashes devem ser idênticos.
 
-### Usando um repositório Git/GitHub autorizado
+### Usando um repositório Git hospedado autorizado
 
-O limite padrão de cada blob é 100 MB, alinhado ao limite de arquivos do GitHub.
+O limite padrão de cada blob é 100 MB, mas o servidor pode usar outro valor.
 No modo `reject`, chunks maiores são rejeitados antes do commit. No modo `lfs`,
 eles são enviados como objetos Git LFS e não entram como blobs no histórico Git.
 Rejeições remotas por limite, conflitos de push/pull e falhas de autenticação são
@@ -401,8 +425,9 @@ publicar → storage → baixar → comparação byte a byte e SHA-256.
   a parte inválida.
 - **storage compartilhado indisponível**: confira montagem, permissões e
   `--storage.path`.
-- **falha de GitHub**: confirme que o remoto está correto e que o SSH agent ou
-  credential helper do Git tem acesso ao repositório privado.
+- **falha do servidor Git**: confirme que o remoto está correto e que o SSH
+  agent, credential helper do Git ou configuração específica do provedor tem
+  acesso ao repositório e ao armazenamento LFS.
 - **falha de armazenamento de objetos**: confirme bucket, região, endpoint e as
   permissões de leitura/listagem e gravação da credencial fornecida ao SDK.
 - **conflito no Git**: faça `git pull --ff-only` no clone, resolva alterações

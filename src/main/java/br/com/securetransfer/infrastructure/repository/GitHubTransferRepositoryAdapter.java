@@ -73,7 +73,7 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         }
         boolean usesLfs = properties.getLargeBlobStrategy() == StorageProperties.LargeBlobStrategy.LFS;
         if (!usesLfs && Files.size(input) > properties.maxBlobSizeBytes()) {
-            throw new StorageException("GitHub rejeita arquivos maiores que o limite configurado de "
+            throw new StorageException("o remoto Git rejeita arquivos maiores que o limite configurado de "
                     + properties.getMaxBlobSize());
         }
 
@@ -426,13 +426,13 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         if (containsAny(lower, "authentication failed", "authentication required", "could not read username",
                 "permission denied", "repository not found", "http 401", "http 403", "unauthorized",
                 "publickey", "access denied", "invalid username or password")) {
-            return "falha de autenticação/autorização do GitHub ao tentar " + operation
+            return "falha de autenticação/autorização do Git ao tentar " + operation
                     + "; configure a credencial do Git/SSH para o repositório privado";
         }
         if (containsAny(lower, "could not resolve host", "failed to connect", "connection refused",
                 "connection timed out", "network is unreachable", "couldn't connect", "unable to access",
                 "service unavailable", "http 500", "http 502", "http 503", "http 504", "timed out")) {
-            return "o remoto GitHub está indisponível ao tentar " + operation
+            return "o remoto Git está indisponível ao tentar " + operation
                     + "; verifique a rede e tente novamente";
         }
         if (containsAny(lower, "non-fast-forward", "fetch first", "rejected", "merge conflict",
@@ -441,9 +441,9 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
             return "conflito no repositório Git ao tentar " + operation
                     + "; sincronize o clone e resolva o conflito antes de tentar novamente";
         }
-        if (containsAny(lower, "file size", "file exceeds", "large files", "gh001", "gh013",
-                "exceeds github")) {
-            return "o GitHub rejeitou a operação por limite de tamanho; reduza storage.git.max-blob-size"
+        if (containsAny(lower, "file size", "file exceeds", "file is too large", "large files",
+                "maximum file size", "exceeds the", "gh001", "gh013")) {
+            return "o remoto Git rejeitou a operação por limite de tamanho; reduza storage.git.max-blob-size"
                     + " ou o tamanho dos chunks";
         }
         return "falha ao tentar " + operation + " no repositório Git; verifique o remoto e as permissões";
