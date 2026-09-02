@@ -4,6 +4,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.util.unit.DataSize;
 
 import java.nio.file.Path;
+import java.time.Duration;
 
 @ConfigurationProperties(prefix = "storage")
 public class StorageProperties {
@@ -116,6 +117,7 @@ public class StorageProperties {
         private boolean pathStyleAccess = true;
         private DataSize multipartThreshold = DataSize.ofMegabytes(100);
         private DataSize multipartPartSize = DataSize.ofMegabytes(8);
+        private Duration orphanRetention = Duration.ofHours(24);
 
         public String getEndpoint() {
             return endpoint;
@@ -179,6 +181,14 @@ public class StorageProperties {
 
         public void setMultipartPartSize(DataSize multipartPartSize) {
             this.multipartPartSize = multipartPartSize;
+        }
+
+        public Duration getOrphanRetention() {
+            return orphanRetention;
+        }
+
+        public void setOrphanRetention(Duration orphanRetention) {
+            this.orphanRetention = orphanRetention;
         }
 
         public long multipartThresholdBytes() {

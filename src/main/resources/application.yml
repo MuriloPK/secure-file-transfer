@@ -20,6 +20,8 @@ storage:
     multipart-part-size: 8MB
     # Chunks enviados antes de um manifest são descartados explicitamente
     # quando a publicação falha antes de iniciar o envio do manifest.
+    # A varredura explícita remove chunks sem manifest mais antigos que este período.
+    orphan-retention: 24h
   git:
     # Para storage.type=git, use SSH ou o credential helper do Git.
     # Nunca coloque token/senha em remote.

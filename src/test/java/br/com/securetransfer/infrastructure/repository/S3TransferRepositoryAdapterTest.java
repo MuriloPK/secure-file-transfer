@@ -36,6 +36,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
@@ -213,6 +214,163 @@ class S3TransferRepositoryAdapterTest {
         verify(client, org.mockito.Mockito.never()).listObjectsV2(
                 any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class));
         verify(client, org.mockito.Mockito.never()).deleteObject(
+                any(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class));
+    }
+
+    @Test
+    void removesOnlyOldValidChunkObjects() throws Exception {
+        S3Client client = mock(S3Client.class);
+        StorageProperties properties = properties();
+        properties.getS3().setOrphanRetention(Duration.ofHours(1));
+        S3TransferRepositoryAdapter adapter = new S3TransferRepositoryAdapter(properties, mapper, client);
+        TransferId oldTransfer = TransferId.newId();
+        TransferId recentTransfer = TransferId.newId();
+        Instant now = Instant.parse("2026-09-02T12:00:00Z");
+
+        when(client.listObjectsV2(any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class)))
+                .thenReturn(ListObjectsV2Response.builder()
+                        .contents(
+                                S3Object.builder()
+                                        .key("blobs/" + oldTransfer + "/chunks/part-00001.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build(),
+                                S3Object.builder()
+                                        .key("blobs/" + recentTransfer + "/chunks/part-00001.bin")
+                                        .lastModified(now.minus(Duration.ofMinutes(30)))
+                                        .build(),
+                                S3Object.builder()
+                                        .key("blobs/not-a-transfer/chunks/part-00001.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build(),
+                                S3Object.builder()
+                                        .key("blobs/" + oldTransfer + "/chunks/nested/part.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build())
+                        .build());
+        when(client.headObject(any(HeadObjectRequest.class))).thenThrow(
+                software.amazon.awssdk.services.s3.model.S3Exception.builder().statusCode(404).build());
+
+        S3TransferRepositoryAdapter.OrphanedBlobCleanupReport report =
+                adapter.cleanupOrphanedBlobs(now);
+
+        assertThat(report.candidates()).isEqualTo(1);
+        assertThat(report.removed()).isEqualTo(1);
+        assertThat(report.preserved()).isZero();
+        assertThat(report.failures()).isZero();
+        ArgumentCaptor<software.amazon.awssdk.services.s3.model.DeleteObjectRequest> delete =
+                ArgumentCaptor.forClass(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class);
+        verify(client).deleteObject(delete.capture());
+        assertThat(delete.getValue().key())
+                .isEqualTo("blobs/" + oldTransfer + "/chunks/part-00001.bin");
+    }
+
+    @Test
+    void preservesOldChunksWhenManifestExists() throws Exception {
+        S3Client client = mock(S3Client.class);
+        StorageProperties properties = properties();
+        properties.getS3().setOrphanRetention(Duration.ofHours(1));
+        S3TransferRepositoryAdapter adapter = new S3TransferRepositoryAdapter(properties, mapper, client);
+        TransferId transferId = TransferId.newId();
+        Instant now = Instant.parse("2026-09-02T12:00:00Z");
+
+        when(client.listObjectsV2(any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class)))
+                .thenReturn(ListObjectsV2Response.builder()
+                        .contents(
+                                S3Object.builder()
+                                        .key("blobs/" + transferId + "/chunks/part-00001.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build(),
+                                S3Object.builder()
+                                        .key("blobs/" + transferId + "/chunks/part-00002.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build())
+                        .build());
+        when(client.headObject(any(HeadObjectRequest.class)))
+                .thenReturn(HeadObjectResponse.builder().build());
+
+        S3TransferRepositoryAdapter.OrphanedBlobCleanupReport report =
+                adapter.cleanupOrphanedBlobs(now);
+
+        assertThat(report.candidates()).isEqualTo(2);
+        assertThat(report.removed()).isZero();
+        assertThat(report.preserved()).isEqualTo(2);
+        assertThat(report.failures()).isZero();
+        verify(client, org.mockito.Mockito.never()).deleteObject(
+                any(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class));
+    }
+
+    @Test
+    void rechecksManifestBeforeEachDeleteAndStopsWhenTransferBecomesAvailable() throws Exception {
+        S3Client client = mock(S3Client.class);
+        StorageProperties properties = properties();
+        properties.getS3().setOrphanRetention(Duration.ofHours(1));
+        S3TransferRepositoryAdapter adapter = new S3TransferRepositoryAdapter(properties, mapper, client);
+        TransferId transferId = TransferId.newId();
+        Instant now = Instant.parse("2026-09-02T12:00:00Z");
+
+        when(client.listObjectsV2(any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class)))
+                .thenReturn(ListObjectsV2Response.builder()
+                        .contents(
+                                S3Object.builder()
+                                        .key("blobs/" + transferId + "/chunks/part-00001.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build(),
+                                S3Object.builder()
+                                        .key("blobs/" + transferId + "/chunks/part-00002.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build())
+                        .build());
+        when(client.headObject(any(HeadObjectRequest.class)))
+                .thenThrow(software.amazon.awssdk.services.s3.model.S3Exception.builder().statusCode(404).build())
+                .thenReturn(HeadObjectResponse.builder().build());
+
+        S3TransferRepositoryAdapter.OrphanedBlobCleanupReport report =
+                adapter.cleanupOrphanedBlobs(now);
+
+        assertThat(report.candidates()).isEqualTo(2);
+        assertThat(report.removed()).isEqualTo(1);
+        assertThat(report.preserved()).isEqualTo(1);
+        assertThat(report.failures()).isZero();
+        verify(client).deleteObject(any(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class));
+        verify(client, org.mockito.Mockito.times(2)).headObject(any(HeadObjectRequest.class));
+    }
+
+    @Test
+    void recordsDeleteFailuresAndContinuesWithOtherOrphans() throws Exception {
+        S3Client client = mock(S3Client.class);
+        StorageProperties properties = properties();
+        properties.getS3().setOrphanRetention(Duration.ofHours(1));
+        S3TransferRepositoryAdapter adapter = new S3TransferRepositoryAdapter(properties, mapper, client);
+        TransferId firstTransfer = TransferId.newId();
+        TransferId secondTransfer = TransferId.newId();
+        Instant now = Instant.parse("2026-09-02T12:00:00Z");
+
+        when(client.listObjectsV2(any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class)))
+                .thenReturn(ListObjectsV2Response.builder()
+                        .contents(
+                                S3Object.builder()
+                                        .key("blobs/" + firstTransfer + "/chunks/part-00001.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build(),
+                                S3Object.builder()
+                                        .key("blobs/" + secondTransfer + "/chunks/part-00001.bin")
+                                        .lastModified(now.minus(Duration.ofHours(2)))
+                                        .build())
+                        .build());
+        when(client.headObject(any(HeadObjectRequest.class))).thenThrow(
+                software.amazon.awssdk.services.s3.model.S3Exception.builder().statusCode(404).build());
+        when(client.deleteObject(any(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class)))
+                .thenThrow(software.amazon.awssdk.services.s3.model.S3Exception.builder().statusCode(503).build())
+                .thenReturn(null);
+
+        S3TransferRepositoryAdapter.OrphanedBlobCleanupReport report =
+                adapter.cleanupOrphanedBlobs(now);
+
+        assertThat(report.candidates()).isEqualTo(2);
+        assertThat(report.removed()).isEqualTo(1);
+        assertThat(report.preserved()).isZero();
+        assertThat(report.failures()).isEqualTo(1);
+        verify(client, org.mockito.Mockito.times(2)).deleteObject(
                 any(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class));
     }
 

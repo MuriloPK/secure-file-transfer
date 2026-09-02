@@ -238,6 +238,7 @@ storage:
     metadata-prefix: metadata
     blob-prefix: blobs
     path-style-access: true                # útil para MinIO e endpoints locais
+    orphan-retention: 24h                  # retenção antes da varredura de órfãos
 ```
 
 O adapter usa a cadeia padrão de credenciais do AWS SDK: variáveis de ambiente
@@ -262,6 +263,17 @@ antes de cada remoção e para sem alterar os blobs quando o manifest já existe
 falhas durante o próprio envio do manifest não acionam essa limpeza, pois o
 resultado da operação remota pode ser indeterminado. O total removido e as
 interrupções da limpeza são registrados no log da aplicação.
+
+Para recuperar blobs deixados por um encerramento abrupto, o
+`S3TransferRepositoryAdapter` também oferece a varredura explícita
+`cleanupOrphanedBlobs()`. Ela lista apenas chunks com formato de transferência
+válido, considera órfãos os objetos cuja última alteração é anterior a
+`storage.s3.orphan-retention` e verifica o manifest imediatamente antes de cada
+remoção. Transferências que já ficaram disponíveis são preservadas, e a rotina
+pode ser executada novamente com segurança. O padrão é `24h`; defina um período
+maior que o tempo máximo esperado para uma publicação. A operação registra
+candidatos, remoções, objetos preservados e falhas, além de retornar essas
+contagens para o chamador.
 
 ### Teste de contrato S3-compatible hospedado
 

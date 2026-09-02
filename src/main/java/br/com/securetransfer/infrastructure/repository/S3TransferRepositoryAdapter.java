@@ -50,9 +50,13 @@ import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * S3-compatible repository that keeps transfer metadata and encrypted blobs in
@@ -79,6 +83,7 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
     private final String blobPrefix;
     private final long multipartThresholdBytes;
     private final long multipartPartSizeBytes;
+    private final Duration orphanRetention;
 
     public S3TransferRepositoryAdapter(StorageProperties storageProperties, ObjectMapper objectMapper) {
         this(storageProperties, objectMapper, createClient(s3Properties(storageProperties)));
@@ -100,6 +105,8 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
         this.multipartThresholdBytes = requirePositiveSize(
                 properties.getMultipartThreshold(), "storage.s3.multipart-threshold");
         this.multipartPartSizeBytes = requireMultipartPartSize(properties.getMultipartPartSize());
+        this.orphanRetention = requirePositiveDuration(
+                properties.getOrphanRetention(), "storage.s3.orphan-retention");
     }
 
     @Override
@@ -292,6 +299,105 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
         LOGGER.info("unpublished transfer cleanup finished transferId={} deleted={}", transferId, deleted);
     }
 
+    /**
+     * Finds old chunk objects whose transfer never acquired a manifest and
+     * removes them. The manifest is checked immediately before every delete,
+     * so a transfer that becomes available while this sweep is running is
+     * preserved. Missing objects are harmless on a later run because object
+     * deletion is idempotent in S3.
+     *
+     * @return counts of candidates, removed objects, preserved objects and
+     *         failures observed during the sweep
+     */
+    public OrphanedBlobCleanupReport cleanupOrphanedBlobs() throws IOException {
+        return cleanupOrphanedBlobs(Instant.now());
+    }
+
+    OrphanedBlobCleanupReport cleanupOrphanedBlobs(Instant now) throws IOException {
+        if (now == null) {
+            throw new IllegalArgumentException("o instante da limpeza não pode ser nulo");
+        }
+        Instant cutoff = now.minus(orphanRetention);
+        Map<TransferId, List<S3Object>> candidatesByTransfer = new LinkedHashMap<>();
+        int candidateCount = 0;
+        String continuationToken = null;
+
+        do {
+            ListObjectsV2Response page;
+            try {
+                ListObjectsV2Request.Builder request = ListObjectsV2Request.builder()
+                        .bucket(bucket)
+                        .prefix(blobPrefix + "/");
+                if (continuationToken != null) {
+                    request.continuationToken(continuationToken);
+                }
+                page = client.listObjectsV2(request.build());
+            } catch (S3Exception | SdkClientException exception) {
+                LOGGER.warn("orphan blob cleanup failed while listing objects", exception);
+                throw storageFailure("listar blobs órfãos", exception);
+            }
+
+            for (S3Object object : page.contents()) {
+                TransferId transferId = transferIdFromChunkKey(object.key());
+                Instant lastModified = object.lastModified();
+                if (transferId == null || lastModified == null || !lastModified.isBefore(cutoff)) {
+                    continue;
+                }
+                candidateCount++;
+                candidatesByTransfer.computeIfAbsent(transferId, ignored -> new ArrayList<>()).add(object);
+                LOGGER.info("orphan blob cleanup candidate transferId={} key={} lastModified={}",
+                        transferId, object.key(), lastModified);
+            }
+            continuationToken = Boolean.TRUE.equals(page.isTruncated()) ? page.nextContinuationToken() : null;
+        } while (continuationToken != null && !continuationToken.isBlank());
+
+        int removedCount = 0;
+        int preservedCount = 0;
+        int failureCount = 0;
+        for (Map.Entry<TransferId, List<S3Object>> entry : candidatesByTransfer.entrySet()) {
+            TransferId transferId = entry.getKey();
+            List<S3Object> transferCandidates = entry.getValue();
+            for (int index = 0; index < transferCandidates.size(); index++) {
+                boolean manifestPresent;
+                try {
+                    manifestPresent = manifestExistsForCleanup(transferId);
+                } catch (IOException | RuntimeException exception) {
+                    failureCount++;
+                    LOGGER.warn("orphan blob cleanup failed transferId={} while checking manifest; "
+                            + "objects preserved", transferId, exception);
+                    break;
+                }
+                if (manifestPresent) {
+                    int preservedForTransfer = transferCandidates.size() - index;
+                    preservedCount += preservedForTransfer;
+                    LOGGER.info("orphan blob cleanup preserved transferId={} objects={} reason=manifest-present",
+                            transferId, preservedForTransfer);
+                    break;
+                }
+
+                S3Object object = transferCandidates.get(index);
+                try {
+                    client.deleteObject(DeleteObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(object.key())
+                            .build());
+                    removedCount++;
+                    LOGGER.info("orphan blob cleanup removed transferId={} key={}", transferId, object.key());
+                } catch (RuntimeException exception) {
+                    failureCount++;
+                    LOGGER.warn("orphan blob cleanup failed transferId={} key={}",
+                            transferId, object.key(), exception);
+                }
+            }
+        }
+
+        OrphanedBlobCleanupReport report = new OrphanedBlobCleanupReport(
+                candidateCount, removedCount, preservedCount, failureCount);
+        LOGGER.info("orphan blob cleanup finished candidates={} removed={} preserved={} failures={} cutoff={}",
+                report.candidates(), report.removed(), report.preserved(), report.failures(), cutoff);
+        return report;
+    }
+
     @Override
     public InputStream downloadChunk(TransferId transferId, TransferChunk chunk) throws IOException {
         ResponseInputStream<GetObjectResponse> response;
@@ -425,6 +531,30 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
         return blobPrefix + "/" + transferId + "/chunks/";
     }
 
+    private TransferId transferIdFromChunkKey(String key) {
+        String prefix = blobPrefix + "/";
+        if (key == null || !key.startsWith(prefix)) {
+            return null;
+        }
+        String remainder = key.substring(prefix.length());
+        int transferSeparator = remainder.indexOf('/');
+        if (transferSeparator <= 0) {
+            return null;
+        }
+        String transferValue = remainder.substring(0, transferSeparator);
+        String chunkPrefix = transferValue + "/chunks/";
+        if (!remainder.startsWith(chunkPrefix)
+                || remainder.length() == chunkPrefix.length()
+                || remainder.substring(chunkPrefix.length()).contains("/")) {
+            return null;
+        }
+        try {
+            return TransferId.parse(transferValue);
+        } catch (IllegalArgumentException exception) {
+            return null;
+        }
+    }
+
     private boolean manifestExistsForCleanup(TransferId transferId) throws IOException {
         try {
             client.headObject(HeadObjectRequest.builder()
@@ -508,6 +638,13 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
         return value.toBytes();
     }
 
+    private static Duration requirePositiveDuration(Duration value, String propertyName) {
+        if (value == null || value.isZero() || value.isNegative()) {
+            throw new IllegalArgumentException(propertyName + " deve ser maior que zero");
+        }
+        return value;
+    }
+
     private static long requireMultipartPartSize(DataSize value) {
         long bytes = requirePositiveSize(value, "storage.s3.multipart-part-size");
         if (bytes < MIN_MULTIPART_PART_SIZE) {
@@ -568,6 +705,9 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
             }
             throw new UncheckedIOException("não foi possível abrir parte do chunk para upload", exception);
         }
+    }
+
+    public record OrphanedBlobCleanupReport(int candidates, int removed, int preserved, int failures) {
     }
 
     /**
