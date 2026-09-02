@@ -23,6 +23,7 @@ jobs:
       SECURE_TRANSFER_GIT_LFS_TEST_BRANCH: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_BRANCH }}
       SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES }}
       SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES }}
+      SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER || 'false' }}
       GIT_TERMINAL_PROMPT: "0"
       GIT_ASKPASS: ""
 
@@ -65,6 +66,10 @@ jobs:
             || { echo "::error::minimum chunk size must be positive"; exit 1; }
           test "$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES" -ge "$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES" \
             || { echo "::error::chunk size must be at least the configured minimum"; exit 1; }
+          case "$SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER" in
+            true|false) ;;
+            *) echo "::error::SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER must be true or false"; exit 1 ;;
+          esac
 
       - name: Configure SSH credentials
         if: env.SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE == 'ssh'
@@ -166,6 +171,7 @@ jobs:
             echo "- Authentication mode: \`$SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE\`"
             echo "- Minimum chunk size validated: \`$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES\` bytes"
             echo "- Chunk size exercised: \`$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES\` bytes"
+            echo "- Transfer retention: \`$SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER\`"
             echo "- Stages: authentication, LFS pointer publication, manifest publication, listing, download"
             echo "- Credentials: SSH key/known hosts or temporary HTTPS credential helper (secret redacted)"
           } >> "$GITHUB_STEP_SUMMARY"

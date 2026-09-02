@@ -223,8 +223,20 @@ na configuração do cliente Git, não por uma credencial no teste.
 O remoto não pode conter usuário, senha ou token; o teste não recebe credenciais
 por argumento, não imprime a URL nem a saída do provedor e fica ignorado quando
 `SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST` não é `true`. O branch, o clone
-temporário e os arquivos baixados são descartáveis; a transferência criada
-permanece no remoto para permitir a inspeção do contrato.
+temporário e os arquivos baixados são descartáveis. Por padrão, depois da
+listagem e do download, o contrato remove do branch somente o diretório
+`transfers/<UUID>` que ele acabou de criar. Antes da remoção, o manifest é lido
+e precisa conter exatamente o mesmo UUID; assim, a limpeza não varre nem altera
+transferências de outros usuários. A remoção é publicada em um commit separado.
+Se a limpeza falhar, o resultado das etapas principais continua visível no log e
+o UUID e o caminho exato para a remoção manual são informados como aviso.
+
+Para inspecionar a transferência no remoto antes de removê-la, configure a
+variável protegida `SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER=true` no
+ambiente `git-lfs-contract`. O teste imprimirá o UUID criado e manterá a
+transferência; após a inspeção, remova somente `transfers/<UUID>` nesse branch
+descartável, faça commit e push. Para a execução agendada normal, mantenha a
+variável ausente ou em `false`.
 
 #### Execução agendada contra um segundo provedor
 
@@ -244,6 +256,7 @@ ficam no repositório:
 | Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_BRANCH`          | branch descartável usada pelo contrato                                                         |
 | Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES` | menor chunk que deve ser aceito pelo armazenamento LFS                                         |
 | Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES`     | tamanho realmente exercitado; deve ser maior ou igual ao mínimo                                |
+| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER` | `true` mantém a transferência para inspeção; `false` (padrão) remove-a após o download          |
 
 Configure esses valores somente no ambiente protegido, habilite a aprovação
 necessária para ele e dê ao workflow acesso ao ambiente. O remoto deve ser

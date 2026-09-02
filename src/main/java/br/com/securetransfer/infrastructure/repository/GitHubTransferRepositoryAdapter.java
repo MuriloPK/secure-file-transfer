@@ -124,6 +124,45 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         }
     }
 
+    /**
+     * Removes one already published transfer from the Git working tree and
+     * publishes that deletion. This intentionally is not part of the
+     * repository port: it is a provider-specific maintenance operation for
+     * disposable contract repositories.
+     */
+    void cleanupPublishedTransfer(TransferId transferId) throws IOException {
+        prepareForPublication(true);
+        Path transferDir = transferPath(transferId);
+        if (!Files.isDirectory(transferDir) || Files.isSymbolicLink(transferDir)) {
+            return;
+        }
+
+        Path manifestPath = transferDir.resolve(MANIFEST);
+        if (!Files.isRegularFile(manifestPath) || Files.isSymbolicLink(manifestPath)) {
+            throw new StorageException("não foi possível confirmar o manifest da transferência de contrato");
+        }
+        TransferManifest manifest;
+        try {
+            manifest = objectMapper.readValue(manifestPath.toFile(), TransferManifest.class);
+        } catch (JsonProcessingException exception) {
+            throw new StorageException("não foi possível confirmar o manifest da transferência de contrato",
+                    exception);
+        }
+        if (!transferId.value().equals(manifest.transferId())) {
+            throw new StorageException("o manifest não corresponde à transferência de contrato solicitada");
+        }
+
+        List<Path> pathsToDelete;
+        try (var paths = Files.walk(transferDir)) {
+            pathsToDelete = paths.sorted(Comparator.reverseOrder()).toList();
+        }
+        for (Path path : pathsToDelete) {
+            Files.deleteIfExists(path);
+        }
+        commitAndPush("remover transferência de contrato " + transferId,
+                relativePath(transferDir));
+    }
+
     @Override
     public InputStream downloadChunk(TransferId transferId, TransferChunk chunk) throws IOException {
         Path path = chunkPath(transferId, chunk);

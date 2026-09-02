@@ -35,6 +35,8 @@ class GitHubTransferRepositoryAdapterTest {
     private static final String LFS_CONTRACT_CHUNK_BYTES = "SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES";
     private static final String LFS_CONTRACT_MIN_CHUNK_BYTES =
             "SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES";
+    private static final String LFS_CONTRACT_RETAIN_TRANSFER =
+            "SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER";
     private static final long DEFAULT_MIN_CHUNK_BYTES = 100L * 1024 * 1024 + 1;
 
     @Test
@@ -68,6 +70,37 @@ class GitHubTransferRepositoryAdapterTest {
         try (InputStream downloaded = second.downloadChunk(transferId, chunk)) {
             assertThat(downloaded.readAllBytes()).containsExactly(content);
         }
+    }
+
+    @Test
+    void cleansOnlyTheRequestedPublishedTransfer(@TempDir Path temp) throws Exception {
+        Path remote = createRemoteRepository(temp);
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var adapter = new GitHubTransferRepositoryAdapter(properties(remote, temp.resolve("clone")), mapper);
+        adapter.synchronize();
+
+        TransferId retainedTransfer = TransferId.newId();
+        TransferId transferToClean = TransferId.newId();
+        byte[] retainedContent = "retain-me".getBytes();
+        byte[] cleanupContent = "clean-me".getBytes();
+        TransferChunk retainedChunk = chunk(retainedContent, "part-00001.bin");
+        TransferChunk cleanupChunk = chunk(cleanupContent, "part-00001.bin");
+        Path retainedSource = temp.resolve("retained.bin");
+        Path cleanupSource = temp.resolve("cleanup.bin");
+        Files.write(retainedSource, retainedContent);
+        Files.write(cleanupSource, cleanupContent);
+
+        adapter.publishChunk(retainedTransfer, retainedChunk, retainedSource);
+        adapter.publishManifest(manifest(retainedTransfer, "retained.zip", retainedContent, retainedChunk));
+        adapter.publishChunk(transferToClean, cleanupChunk, cleanupSource);
+        adapter.publishManifest(manifest(transferToClean, "cleanup.zip", cleanupContent, cleanupChunk));
+
+        adapter.cleanupPublishedTransfer(transferToClean);
+
+        assertThat(adapter.exists(transferToClean)).isFalse();
+        assertThat(adapter.exists(retainedTransfer)).isTrue();
+        assertThat(adapter.listTransfers()).extracting(TransferManifest::transferId)
+                .containsExactly(retainedTransfer.value());
     }
 
     @Test
@@ -333,42 +366,74 @@ class GitHubTransferRepositoryAdapterTest {
         StorageProperties firstProperties = hostedLfsProperties(remote, branch, temp.resolve("clone-a"));
         var first = new GitHubTransferRepositoryAdapter(firstProperties, mapper);
 
-        runContractStage("authentication and repository access", first::synchronize);
-        runContractStage("LFS pointer publication", () -> {
-            first.publishChunk(transferId, chunk, source);
-            Path checkedInChunk = firstProperties.getPath().resolve("transfers")
-                    .resolve(transferId.toString()).resolve("chunks").resolve(chunk.fileName());
-            assertThat(Files.size(checkedInChunk)).isEqualTo(chunkBytes);
-            assertThat(runCapture(firstProperties.getPath(), "git", "show", "HEAD:"
-                    + "transfers/" + transferId + "/chunks/" + chunk.fileName()))
-                    .startsWith("version https://git-lfs.github.com/spec/v1");
-        });
+        boolean retainTransfer = configuredRetention();
+        try {
+            runContractStage("authentication and repository access", first::synchronize);
+            runContractStage("LFS pointer publication", () -> {
+                first.publishChunk(transferId, chunk, source);
+                Path checkedInChunk = firstProperties.getPath().resolve("transfers")
+                        .resolve(transferId.toString()).resolve("chunks").resolve(chunk.fileName());
+                assertThat(Files.size(checkedInChunk)).isEqualTo(chunkBytes);
+                assertThat(runCapture(firstProperties.getPath(), "git", "show", "HEAD:"
+                        + "transfers/" + transferId + "/chunks/" + chunk.fileName()))
+                        .startsWith("version https://git-lfs.github.com/spec/v1");
+            });
 
-        TransferManifest manifest = new TransferManifest(transferId.value(), "arquivo.zip", chunkBytes,
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                chunkBytes, 1, new TransferManifest.EncryptionMetadata("AES/GCM/NoPadding"),
-                List.of(chunk), Instant.now(), TransferStatus.AVAILABLE);
-        runContractStage("manifest publication", () -> first.publishManifest(manifest));
+            TransferManifest manifest = new TransferManifest(transferId.value(), "arquivo.zip", chunkBytes,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    chunkBytes, 1, new TransferManifest.EncryptionMetadata("AES/GCM/NoPadding"),
+                    List.of(chunk), Instant.now(), TransferStatus.AVAILABLE);
+            runContractStage("manifest publication", () -> first.publishManifest(manifest));
 
-        var second = new GitHubTransferRepositoryAdapter(
-                hostedLfsProperties(remote, branch, temp.resolve("clone-b")), mapper);
-        runContractStage("listing", () -> {
-            second.synchronize();
-            assertThat(second.listTransfers()).extracting(TransferManifest::transferId)
-                    .contains(transferId.value());
-        });
-        runContractStage("download", () -> {
-            Path downloaded = temp.resolve("downloaded.bin");
-            try (InputStream input = second.downloadChunk(transferId, chunk);
-                 OutputStream output = Files.newOutputStream(downloaded)) {
-                input.transferTo(output);
-            }
-            assertThat(Files.size(downloaded)).isEqualTo(chunkBytes);
-            assertThat(Files.mismatch(source, downloaded)).isEqualTo(-1L);
-        });
-        System.out.printf("Git LFS contract passed: stages=authentication, pointer-publication, "
-                + "manifest-publication, listing, download; chunkBytes=%d; minimumChunkBytes=%d%n",
-                chunkBytes, minimumChunkBytes);
+            var second = new GitHubTransferRepositoryAdapter(
+                    hostedLfsProperties(remote, branch, temp.resolve("clone-b")), mapper);
+            runContractStage("listing", () -> {
+                second.synchronize();
+                assertThat(second.listTransfers()).extracting(TransferManifest::transferId)
+                        .contains(transferId.value());
+            });
+            runContractStage("download", () -> {
+                Path downloaded = temp.resolve("downloaded.bin");
+                try (InputStream input = second.downloadChunk(transferId, chunk);
+                     OutputStream output = Files.newOutputStream(downloaded)) {
+                    input.transferTo(output);
+                }
+                assertThat(Files.size(downloaded)).isEqualTo(chunkBytes);
+                assertThat(Files.mismatch(source, downloaded)).isEqualTo(-1L);
+            });
+            System.out.printf("Git LFS contract passed: stages=authentication, pointer-publication, "
+                    + "manifest-publication, listing, download; chunkBytes=%d; minimumChunkBytes=%d; "
+                    + "transferId=%s%n", chunkBytes, minimumChunkBytes, transferId);
+        } finally {
+            cleanupContractTransfer(first, transferId, retainTransfer);
+        }
+    }
+
+    private static boolean configuredRetention() {
+        String value = System.getenv(LFS_CONTRACT_RETAIN_TRANSFER);
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        if (!value.equalsIgnoreCase("true") && !value.equalsIgnoreCase("false")) {
+            throw new IllegalArgumentException(LFS_CONTRACT_RETAIN_TRANSFER + " deve ser true ou false");
+        }
+        return Boolean.parseBoolean(value);
+    }
+
+    private static void cleanupContractTransfer(GitHubTransferRepositoryAdapter adapter, TransferId transferId,
+                                                boolean retainTransfer) {
+        if (retainTransfer) {
+            System.out.printf("Git LFS contract transfer retained for inspection: transferId=%s%n", transferId);
+            return;
+        }
+        try {
+            adapter.cleanupPublishedTransfer(transferId);
+            System.out.printf("Git LFS contract transfer cleaned: transferId=%s%n", transferId);
+        } catch (Exception | AssertionError cleanupFailure) {
+            System.err.printf("WARNING: Git LFS contract cleanup failed; transferId=%s; "
+                    + "remove only transfers/%s after inspection: %s%n",
+                    transferId, transferId, cleanupFailure.getMessage());
+        }
     }
 
     private static void runContractStage(String stage, ContractOperation operation) throws Exception {
