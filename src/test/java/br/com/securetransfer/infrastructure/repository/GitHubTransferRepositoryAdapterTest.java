@@ -289,6 +289,52 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void preservesLocalChangeToAlreadyPublishedLfsChunkAndRemovesRejectedCommit(@TempDir Path temp)
+            throws Exception {
+        Path remote = createRemoteRepository(temp);
+        Path clone = temp.resolve("clone");
+        StorageProperties properties = propertiesWithLfs(remote, clone);
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var adapter = new GitHubTransferRepositoryAdapter(properties, mapper);
+        adapter.synchronize();
+
+        TransferId transferId = TransferId.newId();
+        byte[] initialContent = "initial-data".getBytes();
+        TransferChunk chunk = chunk(initialContent, "part-00001.bin");
+        Path source = temp.resolve("chunk.bin");
+        Files.write(source, initialContent);
+        adapter.publishChunk(transferId, chunk, source);
+        adapter.publishManifest(manifest(transferId, "arquivo.zip", initialContent, chunk));
+
+        String publishedHead = runCapture(clone, "git", "rev-parse", "HEAD").trim();
+        Path chunkPath = clone.resolve("transfers").resolve(transferId.toString())
+                .resolve("chunks").resolve(chunk.fileName());
+        String localChange = "manual edit during LFS republication";
+        installRemotePushFailureWithConcurrentEdit(remote, chunkPath, localChange);
+
+        byte[] republishedContent = "updated-data".getBytes();
+        Files.write(source, republishedContent);
+        assertThatThrownBy(() -> adapter.publishChunk(transferId, chunk, source))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("rollback concluído")
+                .hasMessageContaining("alterações locais")
+                .hasMessageContaining("preservadas no clone")
+                .hasMessageContaining("faça commit ou descarte-as");
+
+        assertThat(Files.readString(chunkPath)).isEqualTo(localChange);
+        assertThat(clone.resolve(".gitattributes")).isRegularFile();
+        assertThat(clone.resolve("transfers").resolve(transferId.toString()).resolve("manifest.json"))
+                .isRegularFile();
+        assertThat(runCapture(clone, "git", "rev-parse", "HEAD").trim()).isEqualTo(publishedHead);
+        assertThat(runCapture(remote, "git", "rev-parse", "main").trim()).isEqualTo(publishedHead);
+        assertThat(runCapture(clone, "git", "status", "--porcelain", "--untracked-files=all"))
+                .contains(" M transfers/" + transferId + "/chunks/" + chunk.fileName())
+                .doesNotContain("manifest-")
+                .doesNotContain(".gitattributes");
+        assertThat(runCapture(clone, "git", "diff", "--cached")).isBlank();
+    }
+
+    @Test
     void rejectsBlobAboveConfiguredLimitWithoutExposingRemoteDetails(@TempDir Path temp) throws Exception {
         StorageProperties properties = properties(temp.resolve("remote.git"), temp.resolve("clone"));
         properties.getGit().setMaxBlobSize(DataSize.ofBytes(3));
