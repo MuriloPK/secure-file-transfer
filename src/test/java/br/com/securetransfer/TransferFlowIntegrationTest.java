@@ -3,6 +3,7 @@ package br.com.securetransfer;
 import br.com.securetransfer.application.service.ChunkService;
 import br.com.securetransfer.application.service.DownloadFileService;
 import br.com.securetransfer.application.service.NoOpProgressListener;
+import br.com.securetransfer.application.service.ProgressListener;
 import br.com.securetransfer.application.service.PublishFileService;
 import br.com.securetransfer.application.service.TemporaryFileManager;
 import br.com.securetransfer.application.service.TransferManifestValidator;
@@ -10,11 +11,15 @@ import br.com.securetransfer.configuration.CryptoProperties;
 import br.com.securetransfer.configuration.StorageProperties;
 import br.com.securetransfer.configuration.TransferProperties;
 import br.com.securetransfer.configuration.WorkProperties;
+import br.com.securetransfer.domain.model.TransferChunk;
+import br.com.securetransfer.domain.model.TransferId;
+import br.com.securetransfer.domain.model.TransferManifest;
 import br.com.securetransfer.domain.exception.FileTooLargeException;
 import br.com.securetransfer.infrastructure.crypto.AesGcmEncryptionAdapter;
 import br.com.securetransfer.infrastructure.crypto.SecretKeyProvider;
 import br.com.securetransfer.infrastructure.hash.Sha256HashAdapter;
 import br.com.securetransfer.infrastructure.repository.LocalDirectoryTransferRepositoryAdapter;
+import br.com.securetransfer.ports.out.TransferRepositoryPort;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.io.TempDir;
@@ -27,12 +32,15 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.IntStream;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -111,6 +119,45 @@ class TransferFlowIntegrationTest {
         assertThat(zipEntryNames(downloaded)).containsExactlyElementsOf(MULTI_ENTRY_NAMES);
     }
 
+    @Test
+    void resumesInterruptedMultiEntryZipWithoutRedownloadingValidatedChunks(@TempDir Path temp) throws Exception {
+        TransferFixture fixture = fixture(temp);
+        Path original = temp.resolve("arquivo-com-varios-arquivos-e-retomada.zip");
+        writeDeterministicMultiEntryZip(original, CHUNK_SIZE);
+        Path destination = Files.createDirectory(temp.resolve("destination"));
+
+        long originalSize = Files.size(original);
+        String originalHash = sha256(fixture.hash, original);
+        var manifest = fixture.publisher.publish(original, new NoOpProgressListener());
+        TransferId transferId = new TransferId(manifest.transferId());
+
+        assertThat(manifest.totalChunks()).isGreaterThan(1);
+        assertThat(manifest.originalSize()).isEqualTo(originalSize);
+        assertThat(manifest.originalSha256()).isEqualTo(originalHash);
+
+        ProgressListener interruptAfterFirstChunk = (operation, completed, total, item, totalItems) -> {
+            if ("Baixando".equals(operation) && item == 1) {
+                throw new DownloadInterruptedException();
+            }
+        };
+        assertThatThrownBy(() -> fixture.downloader.download(
+                transferId, destination, interruptAfterFirstChunk))
+                .isInstanceOf(DownloadInterruptedException.class);
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactly(1);
+
+        Path downloaded = fixture.downloader.download(
+                transferId, destination, new NoOpProgressListener());
+
+        assertThat(fixture.repository.downloadedChunkNumbers())
+                .containsExactlyElementsOf(IntStream.rangeClosed(1, manifest.totalChunks())
+                        .boxed().toList());
+        assertThat(downloaded.getFileName().toString()).isEqualTo(original.getFileName().toString());
+        assertThat(Files.size(downloaded)).isEqualTo(originalSize);
+        assertThat(sha256(fixture.hash, downloaded)).isEqualTo(originalHash);
+        assertThat(Files.mismatch(original, downloaded)).isEqualTo(-1L);
+        assertThat(zipEntryNames(downloaded)).containsExactlyElementsOf(MULTI_ENTRY_NAMES);
+    }
+
     @ParameterizedTest(name = "{0} bytes acima do limite é rejeitado")
     @ValueSource(longs = {MAX_FILE_SIZE + 1})
     void rejectsFilesLargerThanMaximum(long size, @TempDir Path temp) throws Exception {
@@ -134,7 +181,8 @@ class TransferFlowIntegrationTest {
         workProperties.setPath(temp.resolve("work"));
 
         ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
-        var repository = new LocalDirectoryTransferRepositoryAdapter(storageProperties, mapper);
+        var localRepository = new LocalDirectoryTransferRepositoryAdapter(storageProperties, mapper);
+        var repository = new CountingTransferRepository(localRepository);
         var hash = new Sha256HashAdapter();
         var encryption = new AesGcmEncryptionAdapter();
         var chunkService = new ChunkService(transferProperties, encryption);
@@ -188,6 +236,16 @@ class TransferFlowIntegrationTest {
         }
     }
 
+    private static void writeDeterministicMultiEntryZip(Path path, long payloadSize) throws Exception {
+        byte[] metadata = "name=secure-transfer\nversion=1\n".getBytes(StandardCharsets.UTF_8);
+
+        try (OutputStream file = new BufferedOutputStream(Files.newOutputStream(path));
+             ZipOutputStream zip = new ZipOutputStream(file)) {
+            writeStoredEntry(zip, MULTI_ENTRY_METADATA_NAME, metadata);
+            writeStoredDeterministicEntry(zip, MULTI_ENTRY_PAYLOAD_NAME, payloadSize);
+        }
+    }
+
     private static void writeStoredEntry(ZipOutputStream zip, String name, byte[] content) throws Exception {
         CRC32 crc = new CRC32();
         crc.update(content);
@@ -199,6 +257,18 @@ class TransferFlowIntegrationTest {
         entry.setCrc(crc.getValue());
         zip.putNextEntry(entry);
         zip.write(content);
+        zip.closeEntry();
+    }
+
+    private static void writeStoredDeterministicEntry(ZipOutputStream zip, String name, long size) throws Exception {
+        ZipEntry entry = new ZipEntry(name);
+        entry.setMethod(ZipEntry.STORED);
+        entry.setTime(0L);
+        entry.setSize(size);
+        entry.setCompressedSize(size);
+        entry.setCrc(crc32OfDeterministicPayload(size));
+        zip.putNextEntry(entry);
+        writeDeterministicPayload(zip, size);
         zip.closeEntry();
     }
 
@@ -261,6 +331,58 @@ class TransferFlowIntegrationTest {
     }
 
     private record TransferFixture(PublishFileService publisher, DownloadFileService downloader,
-                                   LocalDirectoryTransferRepositoryAdapter repository, Sha256HashAdapter hash) {
+                                   CountingTransferRepository repository, Sha256HashAdapter hash) {
+    }
+
+    private static final class CountingTransferRepository implements TransferRepositoryPort {
+        private final TransferRepositoryPort delegate;
+        private final List<Integer> downloadedChunkNumbers = new ArrayList<>();
+
+        private CountingTransferRepository(TransferRepositoryPort delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void synchronize() throws IOException {
+            delegate.synchronize();
+        }
+
+        @Override
+        public void publishChunk(TransferId transferId, TransferChunk chunk, Path source) throws IOException {
+            delegate.publishChunk(transferId, chunk, source);
+        }
+
+        @Override
+        public void publishManifest(TransferManifest manifest) throws IOException {
+            delegate.publishManifest(manifest);
+        }
+
+        @Override
+        public InputStream downloadChunk(TransferId transferId, TransferChunk chunk) throws IOException {
+            downloadedChunkNumbers.add(chunk.number());
+            return delegate.downloadChunk(transferId, chunk);
+        }
+
+        @Override
+        public TransferManifest downloadManifest(TransferId transferId) throws IOException {
+            return delegate.downloadManifest(transferId);
+        }
+
+        @Override
+        public List<TransferManifest> listTransfers() throws IOException {
+            return delegate.listTransfers();
+        }
+
+        @Override
+        public boolean exists(TransferId transferId) {
+            return delegate.exists(transferId);
+        }
+
+        private List<Integer> downloadedChunkNumbers() {
+            return List.copyOf(downloadedChunkNumbers);
+        }
+    }
+
+    private static final class DownloadInterruptedException extends RuntimeException {
     }
 }
