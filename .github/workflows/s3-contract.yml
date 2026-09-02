@@ -17,7 +17,38 @@ permissions:
   contents: read
 
 jobs:
+  release-tag-policy:
+    name: Verify release tag policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source for release tag validation
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify release tag is integrated into main
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          git fetch --no-tags --force origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            echo "::error::release tag ${GITHUB_REF_NAME} does not point to a commit integrated into main"
+            echo "::error::create release tags only from a revision already merged into main"
+            exit 1
+          fi
+          echo "Release tag ${GITHUB_REF_NAME} points to ${tag_commit}, integrated into main."
+
+      - name: Skip release tag validation for non-tag event
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: echo "Release tag validation applies only to v* tag events."
+
   s3-contract:
+    needs: release-tag-policy
     runs-on: ubuntu-latest
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.S3_CONTRACT_ACCESS_KEY_ID }}

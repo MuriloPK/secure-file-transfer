@@ -411,6 +411,53 @@ isso deve ser uma decisão operacional registrada. Crie tags de release somente
 depois do merge em `main`; o workflow também executa novamente em cada tag
 `v*`, como verificação final do commit publicado.
 
+#### Ruleset para tags de release
+
+A proteção de `main` sozinha não protege uma tag criada diretamente. Configure
+também um ruleset de tags em **Settings → Rules → Rulesets → New ruleset** com
+as seguintes definições:
+
+| Definição | Valor |
+|---|---|
+| Nome | `Protect release tags` |
+| Enforcement status | **Active** |
+| Target | **Tags**, padrão incluído `v*` |
+| Bypass list | Somente **Repository administrators** e, se houver, o GitHub App ou a conta de automação de release explicitamente designada |
+| Regras | **Restrict creations**, **Restrict updates** e **Restrict deletions** |
+
+Administradores e a automação de release designada são os únicos atores
+autorizados a criar, atualizar ou excluir tags `v*`. Não inclua
+maintainers/writers, usuários individuais ou workflows comuns no bypass. Se a
+política não admitir nenhuma exceção, ative também **Do not allow bypassing the
+above settings** e remova o bypass de administradores.
+
+O workflow contém uma segunda barreira: o job `Verify release tag policy` busca
+`main` e exige que a revisão apontada pela tag seja ancestral de
+`origin/main`. Se essa validação falhar, o job `s3-contract` não é executado.
+Isso impede que uma tag `v*` criada por configuração incorreta ou por uma
+alteração fora do fluxo protegido inicie a verificação/publicação como se fosse
+uma release válida.
+
+O procedimento de release é:
+
+1. Abra um pull request para `main` e aguarde o check
+   `S3-compatible contract / s3-contract` passar.
+2. Faça o merge pela proteção de `main` e aguarde a revisão aparecer em
+   `origin/main`.
+3. Como ator autorizado pelo ruleset, crie a tag a partir de `main` e publique-a:
+
+   ```bash
+   git fetch origin main
+   git switch --detach origin/main
+   git tag -a vX.Y.Z -m "Release vX.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+4. Confirme o workflow `S3-compatible contract` iniciado pela tag. Não crie
+   tags a partir de branches de feature, não force atualizações e não exclua
+   uma tag publicada para tentar republicá-la. Corrija o código por um novo
+   pull request e use uma nova versão de tag.
+
 ## Variáveis de ambiente
 
 | Variável | Obrigatória | Descrição |
