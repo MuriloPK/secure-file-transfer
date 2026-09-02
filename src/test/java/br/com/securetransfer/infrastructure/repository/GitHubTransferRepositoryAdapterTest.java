@@ -125,6 +125,31 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void rejectsPublicationFromCloneWithLocalChangesWithoutDiscardingThem(@TempDir Path temp) throws Exception {
+        Path remote = createRemoteRepository(temp);
+        Path clone = temp.resolve("clone");
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var adapter = new GitHubTransferRepositoryAdapter(properties(remote, clone), mapper);
+        adapter.synchronize();
+
+        String localChange = "manual change that must survive a rejected publication";
+        Files.writeString(clone.resolve("README"), localChange);
+        TransferId transferId = TransferId.newId();
+        byte[] content = "chunk-data".getBytes();
+        TransferChunk chunk = chunk(content, "part-00001.bin");
+        TransferManifest manifest = manifest(transferId, "arquivo.zip", content, chunk);
+
+        assertThatThrownBy(() -> adapter.publishManifest(manifest))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("alterações locais")
+                .hasMessageContaining("antes de publicar");
+        assertThat(Files.readString(clone.resolve("README"))).isEqualTo(localChange);
+        assertThat(adapter.listTransfers()).isEmpty();
+        assertThat(runCapture(clone, "git", "status", "--porcelain"))
+                .contains(" M README");
+    }
+
+    @Test
     void rejectsBlobAboveConfiguredLimitWithoutExposingRemoteDetails(@TempDir Path temp) throws Exception {
         StorageProperties properties = properties(temp.resolve("remote.git"), temp.resolve("clone"));
         properties.getGit().setMaxBlobSize(DataSize.ofBytes(3));

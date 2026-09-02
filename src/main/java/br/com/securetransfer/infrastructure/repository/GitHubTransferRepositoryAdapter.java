@@ -79,11 +79,7 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
 
         boolean firstChunk = synchronizedPublishingTransfers.add(transferId);
         try {
-            if (firstChunk) {
-                synchronize();
-            } else {
-                ensureRepository();
-            }
+            prepareForPublication(firstChunk);
             boolean lfsAttributesChanged = usesLfs && ensureLfsTracking();
             Path target = chunkPath(transferId, chunk);
             Files.createDirectories(target.getParent());
@@ -109,11 +105,7 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         TransferId transferId = new TransferId(manifest.transferId());
         boolean wasPublishing = synchronizedPublishingTransfers.contains(transferId);
         try {
-            if (!wasPublishing) {
-                synchronize();
-            } else {
-                ensureRepository();
-            }
+            prepareForPublication(!wasPublishing);
             Path transferDir = transferPath(transferId);
             Files.createDirectories(transferDir);
             Path temporary = Files.createTempFile(transferDir, "manifest-", ".tmp");
@@ -252,6 +244,23 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
             throw new StorageException("storage.git.remote é obrigatório quando storage.path ainda não é um clone");
         }
         return remote;
+    }
+
+    private void prepareForPublication(boolean synchronizeFirst) throws IOException {
+        ensureRepository();
+        ensureWorkingTreeClean();
+        if (synchronizeFirst) {
+            ensureLfsAvailable();
+            runGit("sincronizar o repositório Git", "pull", "--ff-only", ORIGIN, properties.getBranch());
+        }
+    }
+
+    private void ensureWorkingTreeClean() throws IOException {
+        String status = runGitCapture("verificar alterações locais antes da publicação",
+                "status", "--porcelain", "--untracked-files=all");
+        if (!status.isBlank()) {
+            throw new StorageException("o clone Git possui alterações locais; faça commit ou descarte-as antes de publicar");
+        }
     }
 
     private void commitAndPush(String message, String... paths) throws IOException {

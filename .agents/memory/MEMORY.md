@@ -1,0 +1,1 @@
+- [Git publication safety](git-publication-safety.md) — reject dirty clones before operations that may roll back a failed publication.
