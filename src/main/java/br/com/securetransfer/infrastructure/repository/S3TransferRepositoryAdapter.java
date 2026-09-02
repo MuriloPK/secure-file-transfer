@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Component;
+import org.springframework.util.unit.DataSize;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.ResponseInputStream;
@@ -24,19 +25,31 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
+import software.amazon.awssdk.services.s3.model.UploadPartRequest;
+import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.channels.Channels;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -55,12 +68,17 @@ import java.util.List;
 @ConditionalOnExpression("'${storage.type:local}'.toLowerCase() matches 'object|s3'")
 public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
     private static final String MANIFEST = "manifest.json";
+    private static final long MIN_MULTIPART_PART_SIZE = 5L * 1024 * 1024;
+    private static final long MAX_MULTIPART_PART_SIZE = 5L * 1024 * 1024 * 1024;
+    private static final int MAX_MULTIPART_PARTS = 10_000;
     private static final Logger LOGGER = LoggerFactory.getLogger(S3TransferRepositoryAdapter.class);
     private final S3Client client;
     private final ObjectMapper objectMapper;
     private final String bucket;
     private final String metadataPrefix;
     private final String blobPrefix;
+    private final long multipartThresholdBytes;
+    private final long multipartPartSizeBytes;
 
     public S3TransferRepositoryAdapter(StorageProperties storageProperties, ObjectMapper objectMapper) {
         this(storageProperties, objectMapper, createClient(s3Properties(storageProperties)));
@@ -79,6 +97,9 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
         if (metadataPrefix.equals(blobPrefix)) {
             throw new IllegalArgumentException("storage.s3.metadata-prefix e blob-prefix devem ser diferentes");
         }
+        this.multipartThresholdBytes = requirePositiveSize(
+                properties.getMultipartThreshold(), "storage.s3.multipart-threshold");
+        this.multipartPartSizeBytes = requireMultipartPartSize(properties.getMultipartPartSize());
     }
 
     @Override
@@ -91,6 +112,10 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
         if (size != chunk.encryptedSize()) {
             throw new StorageException("tamanho do chunk criptografado não corresponde ao manifest");
         }
+        if (size > multipartThresholdBytes) {
+            publishMultipartChunk(transferId, chunk, input, size);
+            return;
+        }
         putObject("publicar chunk " + chunk.number(),
                 PutObjectRequest.builder()
                         .bucket(bucket)
@@ -99,6 +124,99 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
                         .contentType("application/octet-stream")
                         .build(),
                 RequestBody.fromFile(input));
+    }
+
+    private void publishMultipartChunk(TransferId transferId, TransferChunk chunk, Path input, long size)
+            throws IOException {
+        String key = blobKey(transferId, chunk);
+        int expectedParts = numberOfParts(size);
+        String uploadId = null;
+        try {
+            CreateMultipartUploadResponse created = client.createMultipartUpload(CreateMultipartUploadRequest.builder()
+                    .bucket(bucket)
+                    .key(key)
+                    .contentType("application/octet-stream")
+                    .build());
+            uploadId = created.uploadId();
+            if (uploadId == null || uploadId.isBlank()) {
+                throw new StorageException("armazenamento de objetos não retornou o identificador do upload multipart");
+            }
+
+            List<CompletedPart> completedParts = new ArrayList<>(expectedParts);
+            long remaining = size;
+            long offset = 0;
+            for (int partNumber = 1; remaining > 0; partNumber++) {
+                long partSize = Math.min(multipartPartSizeBytes, remaining);
+                long partOffset = offset;
+                UploadPartResponse uploaded = client.uploadPart(
+                        UploadPartRequest.builder()
+                                .bucket(bucket)
+                                .key(key)
+                                .uploadId(uploadId)
+                                .partNumber(partNumber)
+                                .contentLength(partSize)
+                                .build(),
+                        RequestBody.fromContentProvider(
+                                () -> openPart(input, partOffset, partSize),
+                                partSize,
+                                "application/octet-stream"));
+                if (uploaded == null || uploaded.eTag() == null || uploaded.eTag().isBlank()) {
+                    throw new StorageException("armazenamento de objetos não retornou o ETag da parte "
+                            + partNumber);
+                }
+                completedParts.add(CompletedPart.builder()
+                        .partNumber(partNumber)
+                        .eTag(uploaded.eTag())
+                        .build());
+                remaining -= partSize;
+                offset += partSize;
+            }
+
+            client.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(bucket)
+                    .key(key)
+                    .uploadId(uploadId)
+                    .multipartUpload(CompletedMultipartUpload.builder()
+                            .parts(completedParts)
+                            .build())
+                    .build());
+        } catch (S3Exception | SdkClientException exception) {
+            StorageException failure = storageFailure("publicar chunk multipart " + chunk.number(), exception);
+            abortMultipartUpload(bucket, key, uploadId, failure);
+            throw failure;
+        } catch (UncheckedIOException exception) {
+            IOException failure = exception.getCause();
+            abortMultipartUpload(bucket, key, uploadId, failure);
+            throw failure;
+        } catch (RuntimeException exception) {
+            abortMultipartUpload(bucket, key, uploadId, exception);
+            throw exception;
+        }
+    }
+
+    private int numberOfParts(long size) {
+        long parts = size / multipartPartSizeBytes
+                + (size % multipartPartSizeBytes == 0 ? 0 : 1);
+        if (parts > MAX_MULTIPART_PARTS) {
+            throw new StorageException("chunk excede o limite de 10.000 partes do upload multipart");
+        }
+        return Math.toIntExact(parts);
+    }
+
+    private void abortMultipartUpload(String bucket, String key, String uploadId, Throwable failure) {
+        if (uploadId == null || uploadId.isBlank()) {
+            return;
+        }
+        try {
+            client.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket)
+                    .key(key)
+                    .uploadId(uploadId)
+                    .build());
+            LOGGER.info("upload multipart abortado key={}", key);
+        } catch (S3Exception | SdkClientException abortFailure) {
+            failure.addSuppressed(storageFailure("abortar upload multipart", abortFailure));
+        }
     }
 
     @Override
@@ -383,6 +501,24 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
         return normalized;
     }
 
+    private static long requirePositiveSize(DataSize value, String propertyName) {
+        if (value == null || value.toBytes() <= 0) {
+            throw new IllegalArgumentException(propertyName + " deve ser maior que zero");
+        }
+        return value.toBytes();
+    }
+
+    private static long requireMultipartPartSize(DataSize value) {
+        long bytes = requirePositiveSize(value, "storage.s3.multipart-part-size");
+        if (bytes < MIN_MULTIPART_PART_SIZE) {
+            throw new IllegalArgumentException("storage.s3.multipart-part-size deve ser de pelo menos 5MB");
+        }
+        if (bytes > MAX_MULTIPART_PART_SIZE) {
+            throw new IllegalArgumentException("storage.s3.multipart-part-size não pode exceder 5GB");
+        }
+        return bytes;
+    }
+
     private static void validateEndpoint(String endpoint) {
         if (endpoint == null || endpoint.isBlank()) {
             return;
@@ -414,5 +550,73 @@ public class S3TransferRepositoryAdapter implements TransferRepositoryPort {
                     + s3Exception.statusCode() + ")", exception);
         }
         return new StorageException("falha ao " + operation + " no armazenamento de objetos", exception);
+    }
+
+    private static InputStream openPart(Path input, long offset, long length) {
+        SeekableByteChannel source = null;
+        try {
+            source = Files.newByteChannel(input, StandardOpenOption.READ);
+            source.position(offset);
+            return new PartInputStream(Channels.newInputStream(source), length);
+        } catch (IOException exception) {
+            if (source != null) {
+                try {
+                    source.close();
+                } catch (IOException closeException) {
+                    exception.addSuppressed(closeException);
+                }
+            }
+            throw new UncheckedIOException("não foi possível abrir parte do chunk para upload", exception);
+        }
+    }
+
+    /**
+     * Presents only one multipart part to the SDK. A new instance is opened
+     * for each request (including SDK retries), so no part is held in memory
+     * and a consumed stream is never reused.
+     */
+    private static final class PartInputStream extends InputStream {
+        private final InputStream source;
+        private long remaining;
+
+        private PartInputStream(InputStream source, long length) {
+            this.source = source;
+            this.remaining = length;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (remaining == 0) {
+                return -1;
+            }
+            int value = source.read();
+            if (value < 0) {
+                throw new IOException("fonte do chunk terminou durante o upload multipart");
+            }
+            remaining--;
+            return value;
+        }
+
+        @Override
+        public int read(byte[] bytes, int offset, int length) throws IOException {
+            if (remaining == 0) {
+                return -1;
+            }
+            int requested = (int) Math.min(length, remaining);
+            int count = source.read(bytes, offset, requested);
+            if (count < 0) {
+                throw new IOException("fonte do chunk terminou durante o upload multipart");
+            }
+            if (count == 0) {
+                return 0;
+            }
+            remaining -= count;
+            return count;
+        }
+
+        @Override
+        public void close() throws IOException {
+            source.close();
+        }
     }
 }

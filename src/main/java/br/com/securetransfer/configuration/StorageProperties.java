@@ -114,6 +114,8 @@ public class StorageProperties {
         private String metadataPrefix = "metadata";
         private String blobPrefix = "blobs";
         private boolean pathStyleAccess = true;
+        private DataSize multipartThreshold = DataSize.ofMegabytes(100);
+        private DataSize multipartPartSize = DataSize.ofMegabytes(8);
 
         public String getEndpoint() {
             return endpoint;
@@ -161,6 +163,30 @@ public class StorageProperties {
 
         public void setPathStyleAccess(boolean pathStyleAccess) {
             this.pathStyleAccess = pathStyleAccess;
+        }
+
+        public DataSize getMultipartThreshold() {
+            return multipartThreshold;
+        }
+
+        public void setMultipartThreshold(DataSize multipartThreshold) {
+            this.multipartThreshold = multipartThreshold;
+        }
+
+        public DataSize getMultipartPartSize() {
+            return multipartPartSize;
+        }
+
+        public void setMultipartPartSize(DataSize multipartPartSize) {
+            this.multipartPartSize = multipartPartSize;
+        }
+
+        public long multipartThresholdBytes() {
+            return multipartThreshold.toBytes();
+        }
+
+        public long multipartPartSizeBytes() {
+            return multipartPartSize.toBytes();
         }
     }
 }

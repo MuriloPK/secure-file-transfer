@@ -109,6 +109,8 @@ storage:
     metadata-prefix: metadata
     blob-prefix: blobs
     path-style-access: true
+    multipart-threshold: 100MB
+    multipart-part-size: 8MB
   git:
     remote:
     branch: main
@@ -225,6 +227,11 @@ chunks foram enviados; por isso, transferências incompletas não aparecem na
 listagem. Downloads continuam validando tamanho e SHA-256 dos chunks, preservam
 chunks válidos para retomada e só entregam o ZIP depois da validação final.
 `storage.s3.metadata-prefix` e `storage.s3.blob-prefix` devem ser diferentes.
+Chunks maiores que `storage.s3.multipart-threshold` usam o upload multipart do
+S3, com partes de `storage.s3.multipart-part-size` lidas diretamente do arquivo
+sem carregar o chunk inteiro em memória. O tamanho padrão da parte é 8 MiB e
+deve ser de pelo menos 5 MiB para atender ao contrato do S3. Se uma parte falhar,
+a sessão multipart é abortada e o manifest continua sem ser publicado.
 Se uma publicação falhar antes do envio do manifest, o adapter remove
 explicitamente os chunks parciais. A limpeza verifica a ausência do manifest
 antes de cada remoção e para sem alterar os blobs quando o manifest já existe;

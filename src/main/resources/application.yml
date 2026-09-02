@@ -14,6 +14,10 @@ storage:
     metadata-prefix: metadata
     blob-prefix: blobs
     path-style-access: true
+    # Chunks acima do limiar usam upload multipart, sem carregar o chunk inteiro
+    # em memória. O tamanho da parte precisa respeitar o mínimo do S3.
+    multipart-threshold: 100MB
+    multipart-part-size: 8MB
     # Chunks enviados antes de um manifest são descartados explicitamente
     # quando a publicação falha antes de iniciar o envio do manifest.
   git:
