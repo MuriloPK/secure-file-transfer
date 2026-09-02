@@ -226,6 +226,34 @@ listagem. Downloads continuam validando tamanho e SHA-256 dos chunks, preservam
 chunks válidos para retomada e só entregam o ZIP depois da validação final.
 `storage.s3.metadata-prefix` e `storage.s3.blob-prefix` devem ser diferentes.
 
+### Teste de contrato S3-compatible hospedado
+
+O teste de contrato usa o AWS SDK contra um bucket real da AWS, MinIO ou outro
+serviço compatível. Ele é opt-in, publica um chunk e o manifest, confirma que o
+manifest só aparece depois do chunk, lista a transferência, baixa o conteúdo por
+streaming, valida o tamanho e verifica que os objetos usam prefixes separados.
+Cada execução usa um prefixo isolado e remove os dois objetos ao terminar.
+
+Configure um bucket de teste descartável e forneça as credenciais pela cadeia
+padrão do AWS SDK (variáveis de ambiente do provedor, role ou profile), sem
+colocar valores de credenciais no código, na URL ou nos argumentos:
+
+```bash
+export SECURE_TRANSFER_S3_CONTRACT_TEST=true
+export SECURE_TRANSFER_S3_TEST_BUCKET=transferencias-de-teste
+# Opcional para MinIO ou outro endpoint compatível:
+export SECURE_TRANSFER_S3_TEST_ENDPOINT=http://localhost:9000
+export SECURE_TRANSFER_S3_TEST_REGION=us-east-1
+export SECURE_TRANSFER_S3_TEST_PATH_STYLE_ACCESS=true
+./mvnw -Dtest=S3TransferRepositoryAdapterTest test
+```
+
+`SECURE_TRANSFER_S3_TEST_ENDPOINT` pode ficar vazio para AWS S3. Os prefixes
+podem ser ajustados com `SECURE_TRANSFER_S3_TEST_METADATA_PREFIX` e
+`SECURE_TRANSFER_S3_TEST_BLOB_PREFIX`; ambos devem apontar para namespaces
+diferentes e o bucket deve permitir `PutObject`, `GetObject`, `HeadObject`,
+`ListBucket` e `DeleteObject`. Sem a flag de habilitação, o teste é ignorado.
+
 ## Variáveis de ambiente
 
 | Variável | Obrigatória | Descrição |
