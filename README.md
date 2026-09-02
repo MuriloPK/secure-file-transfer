@@ -174,6 +174,29 @@ O modo `reject` mantém o comportamento conservador: qualquer chunk acima de
 `storage.git.max-blob-size` é recusado antes do commit. Ele deve ser usado
 quando o remoto não oferece Git LFS.
 
+### Teste de contrato Git LFS hospedado
+
+Os testes locais usam um repositório bare e não validam a autenticação nem o
+armazenamento LFS do provedor. O teste de contrato hospedado é opt-in, publica
+um chunk padrão de 100 MiB + 1 byte, confirma que o histórico contém apenas o
+ponteiro LFS e valida listagem e download em um segundo clone:
+
+```bash
+export SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST=true
+export SECURE_TRANSFER_GIT_LFS_TEST_REMOTE='git@github.com:organizacao/repositorio-lfs-de-teste.git'
+# Opcional: branch diferente de main ou um tamanho maior que 100 MiB.
+export SECURE_TRANSFER_GIT_LFS_TEST_BRANCH=main
+./mvnw -Dtest=GitHubTransferRepositoryAdapterTest test
+```
+
+Use um repositório descartável/dedicado com Git LFS habilitado e configure a
+credencial pelo SSH agent ou por um credential helper do Git antes de executar.
+O remoto não pode conter usuário, senha ou token; o teste não recebe credenciais
+por argumento, não imprime a URL nem a saída do provedor e fica ignorado quando
+`SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST` não é `true`. O branch, o clone
+temporário e os arquivos baixados são descartáveis; a transferência criada
+permanece no remoto para permitir a inspeção do contrato.
+
 ### Armazenamento de objetos sem Git LFS
 
 Para usar um bucket S3 ou compatível com S3 sem colocar blobs no histórico Git,

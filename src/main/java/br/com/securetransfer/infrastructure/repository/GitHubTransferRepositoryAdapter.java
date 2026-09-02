@@ -391,12 +391,19 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
         return output.toString(StandardCharsets.UTF_8);
     }
 
-    private static String classifyFailure(String operation, String output) {
+    static String classifyFailure(String operation, String output) {
         String lower = output.toLowerCase(Locale.ROOT);
-        if (containsAny(lower, "authentication failed", "could not read username", "permission denied",
-                "repository not found", "http 401", "http 403", "unauthorized", "publickey")) {
+        if (containsAny(lower, "authentication failed", "authentication required", "could not read username",
+                "permission denied", "repository not found", "http 401", "http 403", "unauthorized",
+                "publickey", "access denied", "invalid username or password")) {
             return "falha de autenticação/autorização do GitHub ao tentar " + operation
                     + "; configure a credencial do Git/SSH para o repositório privado";
+        }
+        if (containsAny(lower, "could not resolve host", "failed to connect", "connection refused",
+                "connection timed out", "network is unreachable", "couldn't connect", "unable to access",
+                "service unavailable", "http 500", "http 502", "http 503", "http 504", "timed out")) {
+            return "o remoto GitHub está indisponível ao tentar " + operation
+                    + "; verifique a rede e tente novamente";
         }
         if (containsAny(lower, "non-fast-forward", "fetch first", "rejected", "merge conflict",
                 "divergent branches", "would be overwritten", "not possible to fast-forward",

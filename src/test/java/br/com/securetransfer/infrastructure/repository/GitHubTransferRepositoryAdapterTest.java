@@ -13,6 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.util.unit.DataSize;
 
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
@@ -25,8 +26,15 @@ import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class GitHubTransferRepositoryAdapterTest {
+    private static final String LFS_CONTRACT_ENABLED = "SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST";
+    private static final String LFS_CONTRACT_REMOTE = "SECURE_TRANSFER_GIT_LFS_TEST_REMOTE";
+    private static final String LFS_CONTRACT_BRANCH = "SECURE_TRANSFER_GIT_LFS_TEST_BRANCH";
+    private static final String LFS_CONTRACT_CHUNK_BYTES = "SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES";
+    private static final long GITHUB_BLOB_LIMIT_BYTES = 100L * 1024 * 1024;
+
     @Test
     void publishesChunksBeforeManifestAndSynchronizesASecondClone(@TempDir Path temp) throws Exception {
         Path remote = createRemoteRepository(temp);
@@ -207,6 +215,55 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void verifiesLargeLfsTransferAgainstHostedRemote(@TempDir Path temp) throws Exception {
+        assumeTrue(Boolean.parseBoolean(System.getenv(LFS_CONTRACT_ENABLED)),
+                "contrato Git LFS hospedado desabilitado");
+        String remote = requiredEnvironment(LFS_CONTRACT_REMOTE);
+        String branch = environmentOrDefault(LFS_CONTRACT_BRANCH, "main");
+        long chunkBytes = configuredChunkBytes();
+        assumeTrue(chunkBytes > GITHUB_BLOB_LIMIT_BYTES,
+                "o tamanho do chunk do contrato deve exceder 100 MiB");
+
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        Path source = temp.resolve("hosted-lfs-chunk.bin");
+        writeDeterministicContent(source, chunkBytes);
+        TransferId transferId = TransferId.newId();
+        TransferChunk chunk = new TransferChunk(1, chunkBytes, chunkBytes,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bm9uY2U=", "part-00001.bin");
+        StorageProperties firstProperties = hostedLfsProperties(remote, branch, temp.resolve("clone-a"));
+        var first = new GitHubTransferRepositoryAdapter(firstProperties, mapper);
+
+        first.synchronize();
+        first.publishChunk(transferId, chunk, source);
+        Path checkedInChunk = firstProperties.getPath().resolve("transfers")
+                .resolve(transferId.toString()).resolve("chunks").resolve(chunk.fileName());
+        assertThat(Files.size(checkedInChunk)).isEqualTo(chunkBytes);
+        assertThat(runCapture(firstProperties.getPath(), "git", "show", "HEAD:"
+                + "transfers/" + transferId + "/chunks/" + chunk.fileName()))
+                .startsWith("version https://git-lfs.github.com/spec/v1");
+
+        TransferManifest manifest = new TransferManifest(transferId.value(), "arquivo.zip", chunkBytes,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                chunkBytes, 1, new TransferManifest.EncryptionMetadata("AES/GCM/NoPadding"),
+                List.of(chunk), Instant.now(), TransferStatus.AVAILABLE);
+        first.publishManifest(manifest);
+
+        var second = new GitHubTransferRepositoryAdapter(
+                hostedLfsProperties(remote, branch, temp.resolve("clone-b")), mapper);
+        second.synchronize();
+        assertThat(second.listTransfers()).extracting(TransferManifest::transferId)
+                .contains(transferId.value());
+        Path downloaded = temp.resolve("downloaded.bin");
+        try (InputStream input = second.downloadChunk(transferId, chunk);
+             OutputStream output = Files.newOutputStream(downloaded)) {
+            input.transferTo(output);
+        }
+        assertThat(Files.size(downloaded)).isEqualTo(chunkBytes);
+        assertThat(Files.mismatch(source, downloaded)).isEqualTo(-1L);
+    }
+
+    @Test
     void rejectsCredentialsEmbeddedInRemoteUrl(@TempDir Path temp) {
         StorageProperties properties = properties(temp.resolve("clone"), temp.resolve("clone"));
         properties.getGit().setRemote("https://user:secret@github.com/org/private.git");
@@ -215,6 +272,26 @@ class GitHubTransferRepositoryAdapterTest {
                 new ObjectMapper().registerModule(new JavaTimeModule())))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("não pode conter");
+    }
+
+    @Test
+    void reportsHostedAuthenticationAndAvailabilityFailuresWithoutProviderResponse() {
+        String providerResponse = "batch response: Authentication required: "
+                + "https://github.example.invalid/org/repo.git (provider-secret)";
+        String authenticationMessage = GitHubTransferRepositoryAdapter.classifyFailure(
+                "enviar objetos LFS", providerResponse);
+        assertThat(authenticationMessage)
+                .contains("autenticação")
+                .doesNotContain("provider-secret")
+                .doesNotContain("github.example.invalid");
+
+        String unavailableResponse = "fatal: unable to access remote: HTTP 503 provider-internal-details";
+        String availabilityMessage = GitHubTransferRepositoryAdapter.classifyFailure(
+                "sincronizar o repositório Git", unavailableResponse);
+        assertThat(availabilityMessage)
+                .contains("indisponível")
+                .doesNotContain("provider-internal-details")
+                .doesNotContain("HTTP 503");
     }
 
     @Test
@@ -240,6 +317,57 @@ class GitHubTransferRepositoryAdapterTest {
         properties.getGit().setLargeBlobStrategy(StorageProperties.LargeBlobStrategy.LFS);
         properties.getGit().setMaxBlobSize(DataSize.ofBytes(3));
         return properties;
+    }
+
+    private static StorageProperties hostedLfsProperties(String remote, String branch, Path clone) {
+        StorageProperties properties = new StorageProperties();
+        properties.setType(StorageProperties.StorageType.GIT);
+        properties.setPath(clone);
+        properties.getGit().setRemote(remote);
+        properties.getGit().setBranch(branch);
+        properties.getGit().setMaxBlobSize(DataSize.ofBytes(GITHUB_BLOB_LIMIT_BYTES));
+        properties.getGit().setLargeBlobStrategy(StorageProperties.LargeBlobStrategy.LFS);
+        return properties;
+    }
+
+    private static String requiredEnvironment(String name) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(name + " deve apontar para um remoto Git LFS dedicado");
+        }
+        return value;
+    }
+
+    private static String environmentOrDefault(String name, String defaultValue) {
+        String value = System.getenv(name);
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    private static long configuredChunkBytes() {
+        String value = System.getenv(LFS_CONTRACT_CHUNK_BYTES);
+        if (value == null || value.isBlank()) {
+            return GITHUB_BLOB_LIMIT_BYTES + 1;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(LFS_CONTRACT_CHUNK_BYTES + " deve ser um número inteiro", exception);
+        }
+    }
+
+    private static void writeDeterministicContent(Path target, long size) throws Exception {
+        byte[] buffer = new byte[1024 * 1024];
+        for (int index = 0; index < buffer.length; index++) {
+            buffer[index] = (byte) (index * 31);
+        }
+        try (OutputStream output = Files.newOutputStream(target)) {
+            long remaining = size;
+            while (remaining > 0) {
+                int length = (int) Math.min(remaining, buffer.length);
+                output.write(buffer, 0, length);
+                remaining -= length;
+            }
+        }
     }
 
     private static Path createRemoteRepository(Path temp) throws Exception {
