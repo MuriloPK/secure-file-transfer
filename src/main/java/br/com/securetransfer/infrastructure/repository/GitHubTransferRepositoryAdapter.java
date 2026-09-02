@@ -282,10 +282,40 @@ public class GitHubTransferRepositoryAdapter implements TransferRepositoryPort {
 
     private void rollbackFailedPublication(String previousHead, Exception publicationFailure) {
         try {
-            runGit("remover publicação Git local rejeitada", "reset", "--hard", previousHead);
+            runGit("remover publicação Git local rejeitada preservando alterações locais",
+                    "reset", "--keep", previousHead);
         } catch (IOException | RuntimeException rollbackFailure) {
-            publicationFailure.addSuppressed(rollbackFailure);
+            StorageException safeFailure = new StorageException(
+                    "falha ao publicar no repositório Git; não foi possível concluir o rollback com segurança"
+                            + "; alterações locais podem ter sido preservadas no clone",
+                    publicationFailure);
+            safeFailure.addSuppressed(rollbackFailure);
+            throw safeFailure;
         }
+
+        String status;
+        try {
+            status = runGitCapture("verificar o estado do clone após o rollback",
+                    "status", "--porcelain", "--untracked-files=all");
+        } catch (IOException statusFailure) {
+            StorageException safeFailure = new StorageException(
+                    "falha ao publicar no repositório Git; o rollback foi concluído, mas não foi possível"
+                            + " verificar o estado do clone",
+                    publicationFailure);
+            safeFailure.addSuppressed(statusFailure);
+            throw safeFailure;
+        }
+        if (!status.isBlank()) {
+            throw new StorageException(
+                    failureMessage(publicationFailure)
+                            + "; rollback concluído e alterações locais detectadas durante a publicação"
+                            + " foram preservadas no clone; faça commit ou descarte-as antes de tentar novamente",
+                    publicationFailure);
+        }
+    }
+
+    private static String failureMessage(Exception failure) {
+        return failure.getMessage() == null ? "falha ao publicar no repositório Git" : failure.getMessage();
     }
 
     private String relativePath(Path path) {

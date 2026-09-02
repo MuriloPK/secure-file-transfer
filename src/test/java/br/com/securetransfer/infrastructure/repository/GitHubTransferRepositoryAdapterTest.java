@@ -158,6 +158,37 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void preservesLocalChangeCreatedDuringRejectedPublicationAndRemovesGeneratedFiles(@TempDir Path temp)
+            throws Exception {
+        Path remote = createRemoteRepository(temp);
+        Path clone = temp.resolve("clone");
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var adapter = new GitHubTransferRepositoryAdapter(properties(remote, clone), mapper);
+        adapter.synchronize();
+
+        String localChange = "manual change created while publication was in progress";
+        installPushFailureWithConcurrentEdit(clone, clone.resolve("README"), localChange);
+        TransferId transferId = TransferId.newId();
+        byte[] content = "chunk-data".getBytes();
+        TransferChunk chunk = chunk(content, "part-00001.bin");
+        TransferManifest manifest = manifest(transferId, "arquivo.zip", content, chunk);
+
+        assertThatThrownBy(() -> adapter.publishManifest(manifest))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("conflito no repositório Git ao tentar enviar alterações ao repositório Git")
+                .hasMessageContaining("rollback concluído")
+                .hasMessageContaining("alterações locais detectadas durante a publicação")
+                .hasMessageContaining("preservadas no clone");
+        assertThat(Files.readString(clone.resolve("README"))).isEqualTo(localChange);
+        assertThat(clone.resolve("transfers").resolve(transferId.toString()).resolve("manifest.json"))
+                .doesNotExist();
+        assertThat(adapter.listTransfers()).isEmpty();
+        assertThat(runCapture(clone, "git", "status", "--porcelain"))
+                .contains(" M README")
+                .doesNotContain(transferId.toString());
+    }
+
+    @Test
     void rejectsBlobAboveConfiguredLimitWithoutExposingRemoteDetails(@TempDir Path temp) throws Exception {
         StorageProperties properties = properties(temp.resolve("remote.git"), temp.resolve("clone"));
         properties.getGit().setMaxBlobSize(DataSize.ofBytes(3));
@@ -421,6 +452,21 @@ class GitHubTransferRepositoryAdapterTest {
                 + "  touch \"$marker/" + name + "-first\"\n"
                 + "  while [ ! -f \"$marker/" + otherName + "-first\" ]; do sleep 0.01; done\n"
                 + "fi\n";
+        Files.writeString(hook, script);
+        Files.setPosixFilePermissions(hook, EnumSet.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.OWNER_EXECUTE));
+    }
+
+    private static void installPushFailureWithConcurrentEdit(Path clone, Path editedFile, String content)
+            throws Exception {
+        Path hook = clone.resolve(".git/hooks/pre-push");
+        String script = "#!/bin/sh\n"
+                + "set -eu\n"
+                + "printf '%s' " + shellQuote(content) + " > " + shellQuote(editedFile.toAbsolutePath().toString()) + "\n"
+                + "printf '%s\\n' 'simulated concurrent publication failure' >&2\n"
+                + "exit 1\n";
         Files.writeString(hook, script);
         Files.setPosixFilePermissions(hook, EnumSet.of(
                 PosixFilePermission.OWNER_READ,
