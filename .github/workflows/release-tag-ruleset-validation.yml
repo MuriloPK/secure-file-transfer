@@ -1,0 +1,98 @@
+name: Release tag ruleset validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      existing_tag:
+        description: Existing v* tag created by an authorized actor
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  reject-non-bypass-tag-mutations:
+    name: Reject non-bypass tag mutations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify creation, update and deletion are rejected
+        shell: bash
+        env:
+          EXISTING_TAG: ${{ inputs.existing_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EXISTING_TAG" != v* ]]; then
+            echo "::error::existing_tag must match v*"
+            exit 1
+          fi
+
+          git fetch --force origin \
+            "refs/tags/$EXISTING_TAG:refs/tags/$EXISTING_TAG"
+
+          denied_create_tag="v0.0.0-denied-create-${GITHUB_RUN_ID}"
+          git tag -a "$denied_create_tag" -m "Expected creation rejection"
+
+          expect_ruleset_rejection() {
+            local operation="$1"
+            shift
+            local output_file
+            output_file="$(mktemp)"
+
+            set +e
+            "$@" >"$output_file" 2>&1
+            local status=$?
+            set -e
+
+            if [[ "$status" -eq 0 ]]; then
+              cat "$output_file"
+              echo "::error::$operation unexpectedly succeeded"
+              rm -f "$output_file"
+              return 1
+            fi
+
+            if ! grep -Eqi \
+              'GH013|repository rule violations|Cannot (create|update|delete) ref' \
+              "$output_file"; then
+              cat "$output_file"
+              echo "::error::$operation failed without a ruleset rejection"
+              rm -f "$output_file"
+              return 1
+            fi
+
+            echo "$operation rejected by Protect release tags."
+            rm -f "$output_file"
+          }
+
+          expect_ruleset_rejection \
+            "creation" \
+            git push origin \
+            "refs/tags/$denied_create_tag:refs/tags/$denied_create_tag"
+
+          git tag -f -a "$EXISTING_TAG" -m "Expected update rejection"
+          expect_ruleset_rejection \
+            "update" \
+            git push --force origin \
+            "refs/tags/$EXISTING_TAG:refs/tags/$EXISTING_TAG"
+
+          expect_ruleset_rejection \
+            "deletion" \
+            git push origin \
+            ":refs/tags/$EXISTING_TAG"
+
+          {
+            echo "## Protect release tags"
+            echo ""
+            echo "- Actor: GitHub Actions \`GITHUB_TOKEN\` without bypass"
+            echo "- Creation of \`$denied_create_tag\`: rejected"
+            echo "- Update of \`$EXISTING_TAG\`: rejected"
+            echo "- Deletion of \`$EXISTING_TAG\`: rejected"
+            echo "- Credentials: managed by GitHub Actions and not logged"
+          } >> "$GITHUB_STEP_SUMMARY"
