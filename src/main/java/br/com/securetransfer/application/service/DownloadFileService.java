@@ -54,9 +54,11 @@ public class DownloadFileService {
         if (Files.getFileStore(destination).getUsableSpace() < manifest.originalSize()) {
             throw new InsufficientDiskSpaceException("espaço insuficiente no destino");
         }
-        temporaryFiles.cleanupAbandonedDestinationFiles(destination);
-        try (TemporaryFileManager.DownloadSession downloadSession =
+        try (TemporaryFileManager.DestinationSession destinationSession =
+                     temporaryFiles.openDestinationSession(destination);
+             TemporaryFileManager.DownloadSession downloadSession =
                      temporaryFiles.openDownloadSession(transferId)) {
+            temporaryFiles.cleanupAbandonedDestinationFiles(destinationSession);
             Path downloadDirectory = downloadSession.directory();
             LOGGER.info("transfer download started transferId={}", transferId);
             for (TransferChunk chunk : manifest.chunks()) {

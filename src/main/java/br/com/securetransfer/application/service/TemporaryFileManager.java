@@ -15,7 +15,10 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Comparator;
+import java.util.HexFormat;
 
 @Component
 public class TemporaryFileManager {
@@ -25,6 +28,8 @@ public class TemporaryFileManager {
     private static final String INCOMING_CHUNK_SUFFIX = ".download";
     private static final String ASSEMBLED_FILE_PREFIX = ".secure-transfer-assembly-";
     private static final String ASSEMBLED_FILE_SUFFIX = ".download";
+    private static final String DESTINATION_LOCK_PREFIX = ".secure-transfer-destination-";
+    private static final String DESTINATION_LOCK_SUFFIX = ".lock";
     private final Path uploadRoot;
     private final Path downloadRoot;
 
@@ -88,6 +93,38 @@ public class TemporaryFileManager {
             return 0;
         }
 
+        Path lockPath = destinationLockPath(destination);
+        try (FileChannel channel = openLockChannel(lockPath)) {
+            FileLock lock = tryLock(channel);
+            if (lock == null) {
+                return 0;
+            }
+            try {
+                return cleanupAbandonedDestinationFilesLocked(destination);
+            } finally {
+                lock.release();
+            }
+        }
+    }
+
+    int cleanupAbandonedDestinationFiles(DestinationSession session) throws IOException {
+        return cleanupAbandonedDestinationFilesLocked(session.destination);
+    }
+
+    public DestinationSession openDestinationSession(Path destination) throws IOException {
+        Path normalizedDestination = destination.toAbsolutePath().normalize();
+        Path lockPath = destinationLockPath(normalizedDestination);
+        FileChannel channel = openLockChannel(lockPath);
+        try {
+            FileLock lock = acquireLock(channel);
+            return new DestinationSession(normalizedDestination, channel, lock);
+        } catch (IOException | RuntimeException exception) {
+            channel.close();
+            throw exception;
+        }
+    }
+
+    private int cleanupAbandonedDestinationFilesLocked(Path destination) throws IOException {
         int removedFiles = 0;
         try (var files = Files.list(destination)) {
             for (Path file : files.toList()) {
@@ -184,9 +221,81 @@ public class TemporaryFileManager {
         }
     }
 
+    private static FileLock acquireLock(FileChannel channel) throws IOException {
+        while (true) {
+            FileLock lock = tryLock(channel);
+            if (lock != null) {
+                return lock;
+            }
+            try {
+                Thread.sleep(10L);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IOException("espera pelo bloqueio de destino interrompida", exception);
+            }
+        }
+    }
+
+    private FileChannel openLockChannel(Path lockPath) throws IOException {
+        Files.createDirectories(lockPath.getParent());
+        rejectSymbolicLink(lockPath);
+        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+    }
+
+    private Path destinationLockPath(Path destination) {
+        byte[] digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256")
+                    .digest(destination.toAbsolutePath().normalize().toString().getBytes(StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 indisponível", exception);
+        }
+        return downloadRoot.resolve(DESTINATION_LOCK_PREFIX
+                + HexFormat.of().formatHex(digest) + DESTINATION_LOCK_SUFFIX);
+    }
+
     private static void rejectSymbolicLink(Path path) throws IOException {
         if (Files.isSymbolicLink(path)) {
             throw new IOException("arquivo de bloqueio simbólico não é permitido: " + path);
+        }
+    }
+
+    public static final class DestinationSession implements AutoCloseable {
+        private final Path destination;
+        private final FileChannel channel;
+        private final FileLock lock;
+        private boolean closed;
+
+        private DestinationSession(Path destination, FileChannel channel, FileLock lock) {
+            this.destination = destination;
+            this.channel = channel;
+            this.lock = lock;
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            IOException failure = null;
+            try {
+                lock.release();
+            } catch (IOException exception) {
+                failure = exception;
+            }
+            try {
+                channel.close();
+            } catch (IOException exception) {
+                if (failure == null) {
+                    failure = exception;
+                } else {
+                    failure.addSuppressed(exception);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
         }
     }
 

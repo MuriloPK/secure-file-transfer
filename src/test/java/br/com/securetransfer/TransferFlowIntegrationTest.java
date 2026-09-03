@@ -41,6 +41,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
@@ -296,6 +300,65 @@ class TransferFlowIntegrationTest {
     }
 
     @Test
+    void concurrentDownloadsPreserveActiveAssemblyAndUserFiles(@TempDir Path temp) throws Exception {
+        TransferFixture fixture = fixture(temp);
+        Path firstOriginal = temp.resolve("primeiro-download.zip");
+        Path secondOriginal = temp.resolve("segundo-download.zip");
+        writeDeterministicMultiEntryZip(firstOriginal, CHUNK_SIZE);
+        writeDeterministicMultiEntryZip(secondOriginal, CHUNK_SIZE);
+        Path destination = Files.createDirectory(temp.resolve("destination"));
+        Path userFile = destination.resolve("keep-me.download");
+        Files.writeString(userFile, "arquivo do usuário");
+
+        String firstHash = sha256(fixture.hash, firstOriginal);
+        String secondHash = sha256(fixture.hash, secondOriginal);
+        TransferManifest firstManifest = fixture.publisher.publish(firstOriginal, new NoOpProgressListener());
+        TransferManifest secondManifest = fixture.publisher.publish(secondOriginal, new NoOpProgressListener());
+        TransferId firstId = new TransferId(firstManifest.transferId());
+        TransferId secondId = new TransferId(secondManifest.transferId());
+        CountDownLatch assemblyStarted = new CountDownLatch(1);
+        CountDownLatch releaseAssembly = new CountDownLatch(1);
+        ProgressListener pauseDuringAssembly = (operation, completed, total, item, totalItems) -> {
+            if ("Montando".equals(operation) && item == 1) {
+                assemblyStarted.countDown();
+                await(releaseAssembly);
+            }
+        };
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var firstDownload = executor.submit(() ->
+                    fixture.downloader.download(firstId, destination, pauseDuringAssembly));
+            assertThat(assemblyStarted.await(10, TimeUnit.SECONDS)).isTrue();
+
+            var secondDownload = executor.submit(() ->
+                    fixture.downloader.download(secondId, destination, new NoOpProgressListener()));
+            TemporaryFileManager restartedTemporaryFiles = new TemporaryFileManager(workProperties(temp));
+
+            assertThat(restartedTemporaryFiles.cleanupAbandonedDestinationFiles(destination)).isZero();
+            try (var files = Files.list(destination)) {
+                assertThat(files.filter(path -> path.getFileName().toString()
+                                .startsWith(".secure-transfer-assembly-"))
+                        .count()).isEqualTo(1);
+            }
+
+            releaseAssembly.countDown();
+            Path firstDownloaded = firstDownload.get(10, TimeUnit.SECONDS);
+            Path secondDownloaded = secondDownload.get(10, TimeUnit.SECONDS);
+            assertThat(firstDownloaded).isEqualTo(destination.resolve(firstOriginal.getFileName()));
+            assertThat(secondDownloaded).isEqualTo(destination.resolve(secondOriginal.getFileName()));
+            assertThat(sha256(fixture.hash, firstDownloaded)).isEqualTo(firstHash);
+            assertThat(sha256(fixture.hash, secondDownloaded)).isEqualTo(secondHash);
+            assertThat(Files.mismatch(firstOriginal, firstDownloaded)).isEqualTo(-1L);
+            assertThat(Files.mismatch(secondOriginal, secondDownloaded)).isEqualTo(-1L);
+            assertThat(userFile).hasContent("arquivo do usuário");
+        } finally {
+            releaseAssembly.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void redownloadsChunkAfterInterruptedRemoteRead(@TempDir Path temp) throws Exception {
         TransferFixture fixture = fixture(temp);
         Path original = temp.resolve("arquivo-com-leitura-remota-interrompida.zip");
@@ -410,6 +473,23 @@ class TransferFlowIntegrationTest {
         var downloader = new DownloadFileService(repository, validator, temporaryFiles,
                 hash, encryption, keyProvider);
         return new TransferFixture(publisher, downloader, repository, hash, temporaryFiles);
+    }
+
+    private static WorkProperties workProperties(Path temp) {
+        WorkProperties workProperties = new WorkProperties();
+        workProperties.setPath(temp.resolve("work"));
+        return workProperties;
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            if (!latch.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("tempo esgotado aguardando o download concorrente");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("aguarda interrompida", exception);
+        }
     }
 
     private static void writeDeterministicZip(Path path, long size) throws Exception {
