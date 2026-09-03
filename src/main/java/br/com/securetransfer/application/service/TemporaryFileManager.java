@@ -23,6 +23,8 @@ public class TemporaryFileManager {
     private static final String DOWNLOAD_LOCK_FILE = ".download.lock";
     private static final String INCOMING_CHUNK_PREFIX = "chunk-";
     private static final String INCOMING_CHUNK_SUFFIX = ".download";
+    private static final String ASSEMBLED_FILE_PREFIX = ".secure-transfer-assembly-";
+    private static final String ASSEMBLED_FILE_SUFFIX = ".download";
     private final Path uploadRoot;
     private final Path downloadRoot;
 
@@ -38,6 +40,10 @@ public class TemporaryFileManager {
 
     public Path createDownloadDirectory(TransferId transferId) throws IOException {
         return Files.createDirectories(downloadRoot.resolve(transferId.toString()).normalize());
+    }
+
+    public Path createAssemblyFile(Path destination) throws IOException {
+        return Files.createTempFile(destination, ASSEMBLED_FILE_PREFIX, ASSEMBLED_FILE_SUFFIX);
     }
 
     /**
@@ -72,6 +78,24 @@ public class TemporaryFileManager {
                     continue;
                 }
                 removedFiles += cleanupAbandonedDownloadDirectory(directory);
+            }
+        }
+        return removedFiles;
+    }
+
+    public int cleanupAbandonedDestinationFiles(Path destination) throws IOException {
+        if (!Files.isDirectory(destination)) {
+            return 0;
+        }
+
+        int removedFiles = 0;
+        try (var files = Files.list(destination)) {
+            for (Path file : files.toList()) {
+                if (Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
+                        && isAbandonedAssemblyFile(file)
+                        && Files.deleteIfExists(file)) {
+                    removedFiles++;
+                }
             }
         }
         return removedFiles;
@@ -144,6 +168,12 @@ public class TemporaryFileManager {
         String fileName = path.getFileName().toString();
         return fileName.startsWith(INCOMING_CHUNK_PREFIX)
                 && fileName.endsWith(INCOMING_CHUNK_SUFFIX);
+    }
+
+    private static boolean isAbandonedAssemblyFile(Path path) {
+        String fileName = path.getFileName().toString();
+        return fileName.startsWith(ASSEMBLED_FILE_PREFIX)
+                && fileName.endsWith(ASSEMBLED_FILE_SUFFIX);
     }
 
     private static FileLock tryLock(FileChannel channel) throws IOException {

@@ -197,6 +197,58 @@ class TransferFlowIntegrationTest {
     }
 
     @Test
+    void cleansAbandonedAssemblyOnRestartWithoutTouchingUserFilesAndResumes(@TempDir Path temp) throws Exception {
+        TransferFixture fixture = fixture(temp);
+        Path original = temp.resolve("arquivo-com-residuo-de-montagem.zip");
+        writeDeterministicMultiEntryZip(original, CHUNK_SIZE);
+        Path destination = Files.createDirectory(temp.resolve("destination"));
+
+        long originalSize = Files.size(original);
+        String originalHash = sha256(fixture.hash, original);
+        var manifest = fixture.publisher.publish(original, new NoOpProgressListener());
+        TransferId transferId = new TransferId(manifest.transferId());
+        List<Integer> chunkNumbers = IntStream.rangeClosed(1, manifest.totalChunks()).boxed().toList();
+
+        ProgressListener interruptDuringAssembly = (operation, completed, total, item, totalItems) -> {
+            if ("Montando".equals(operation) && item == 2) {
+                throw new AssemblyInterruptedError();
+            }
+        };
+        assertThatThrownBy(() -> fixture.downloader.download(
+                transferId, destination, interruptDuringAssembly))
+                .isInstanceOf(AssemblyInterruptedError.class);
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactlyElementsOf(chunkNumbers);
+
+        Path abandonedAssembly;
+        try (var files = Files.list(destination)) {
+            abandonedAssembly = files
+                    .filter(path -> path.getFileName().toString().startsWith(".secure-transfer-assembly-"))
+                    .findFirst()
+                    .orElseThrow();
+        }
+        Path userFile = destination.resolve("keep-me.download");
+        Files.writeString(userFile, "arquivo do usuário");
+        assertThat(abandonedAssembly).isRegularFile();
+
+        WorkProperties restartedWorkProperties = new WorkProperties();
+        restartedWorkProperties.setPath(temp.resolve("work"));
+        TemporaryFileManager restartedTemporaryFiles = new TemporaryFileManager(restartedWorkProperties);
+        assertThat(restartedTemporaryFiles.cleanupAbandonedDestinationFiles(destination)).isEqualTo(1);
+        assertThat(abandonedAssembly).doesNotExist();
+        assertThat(userFile).hasContent("arquivo do usuário");
+
+        Path downloaded = fixture.downloader.download(
+                transferId, destination, new NoOpProgressListener());
+
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactlyElementsOf(chunkNumbers);
+        assertThat(downloaded.getFileName().toString()).isEqualTo(original.getFileName().toString());
+        assertThat(Files.size(downloaded)).isEqualTo(originalSize);
+        assertThat(sha256(fixture.hash, downloaded)).isEqualTo(originalHash);
+        assertThat(Files.mismatch(original, downloaded)).isEqualTo(-1L);
+        assertThat(userFile).hasContent("arquivo do usuário");
+    }
+
+    @Test
     void cleansAbandonedIncomingChunkAndPreservesValidatedChunksForResume(@TempDir Path temp) throws Exception {
         TransferFixture fixture = fixture(temp);
         Path original = temp.resolve("arquivo-com-residuo-de-download.zip");
@@ -613,5 +665,8 @@ class TransferFlowIntegrationTest {
     }
 
     private static final class AssemblyInterruptedException extends RuntimeException {
+    }
+
+    private static final class AssemblyInterruptedError extends Error {
     }
 }

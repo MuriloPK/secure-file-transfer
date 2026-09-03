@@ -54,6 +54,7 @@ public class DownloadFileService {
         if (Files.getFileStore(destination).getUsableSpace() < manifest.originalSize()) {
             throw new InsufficientDiskSpaceException("espaço insuficiente no destino");
         }
+        temporaryFiles.cleanupAbandonedDestinationFiles(destination);
         try (TemporaryFileManager.DownloadSession downloadSession =
                      temporaryFiles.openDownloadSession(transferId)) {
             Path downloadDirectory = downloadSession.directory();
@@ -91,7 +92,7 @@ public class DownloadFileService {
                         manifest.chunks().stream().mapToLong(TransferChunk::encryptedSize).sum(),
                         chunk.number(), manifest.totalChunks());
             }
-            Path assembled = Files.createTempFile(destination, "." + manifest.fileName() + ".", ".download");
+            Path assembled = temporaryFiles.createAssemblyFile(destination);
             try {
                 assemble(manifest, downloadDirectory, assembled, progress);
                 String finalHash;
