@@ -197,6 +197,53 @@ class TransferFlowIntegrationTest {
     }
 
     @Test
+    void cleansAbandonedIncomingChunkAndPreservesValidatedChunksForResume(@TempDir Path temp) throws Exception {
+        TransferFixture fixture = fixture(temp);
+        Path original = temp.resolve("arquivo-com-residuo-de-download.zip");
+        writeDeterministicMultiEntryZip(original, CHUNK_SIZE);
+        Path destination = Files.createDirectory(temp.resolve("destination"));
+
+        var manifest = fixture.publisher.publish(original, new NoOpProgressListener());
+        TransferId transferId = new TransferId(manifest.transferId());
+        ProgressListener stopAfterFirstChunk = (operation, completed, total, item, totalItems) -> {
+            if ("Baixando".equals(operation) && item == 1) {
+                throw new DownloadInterruptedException();
+            }
+        };
+        assertThatThrownBy(() -> fixture.downloader.download(
+                transferId, destination, stopAfterFirstChunk))
+                .isInstanceOf(DownloadInterruptedException.class);
+
+        Path downloadDirectory = temp.resolve("work/download").resolve(transferId.toString());
+        Path validatedChunk = downloadDirectory.resolve(manifest.chunks().get(0).fileName());
+        Path abandonedIncoming = Files.createTempFile(downloadDirectory, "chunk-", ".download");
+        Path unrelatedFile = downloadDirectory.resolve("keep-me.download");
+        Files.writeString(unrelatedFile, "arquivo fora do protocolo de temporários");
+        assertThat(validatedChunk).isRegularFile();
+        assertThat(abandonedIncoming).isRegularFile();
+
+        try (var activeDownload = fixture.temporaryFiles.openDownloadSession(transferId)) {
+            assertThat(fixture.temporaryFiles.cleanupAbandonedDownloads()).isZero();
+            assertThat(abandonedIncoming).isRegularFile();
+        }
+        WorkProperties restartedWorkProperties = new WorkProperties();
+        restartedWorkProperties.setPath(temp.resolve("work"));
+        TemporaryFileManager restartedTemporaryFiles = new TemporaryFileManager(restartedWorkProperties);
+        assertThat(restartedTemporaryFiles.cleanupAbandonedDownloads()).isEqualTo(1);
+        assertThat(validatedChunk).isRegularFile();
+        assertThat(abandonedIncoming).doesNotExist();
+        assertThat(unrelatedFile).isRegularFile();
+
+        Path downloaded = fixture.downloader.download(
+                transferId, destination, new NoOpProgressListener());
+
+        assertThat(fixture.repository.downloadedChunkNumbers()).containsExactlyElementsOf(
+                IntStream.rangeClosed(1, manifest.totalChunks()).boxed().toList());
+        assertThat(downloaded.getFileName().toString()).isEqualTo(original.getFileName().toString());
+        assertThat(Files.mismatch(original, downloaded)).isEqualTo(-1L);
+    }
+
+    @Test
     void redownloadsChunkAfterInterruptedRemoteRead(@TempDir Path temp) throws Exception {
         TransferFixture fixture = fixture(temp);
         Path original = temp.resolve("arquivo-com-leitura-remota-interrompida.zip");
@@ -310,7 +357,7 @@ class TransferFlowIntegrationTest {
         var validator = new TransferManifestValidator(transferProperties);
         var downloader = new DownloadFileService(repository, validator, temporaryFiles,
                 hash, encryption, keyProvider);
-        return new TransferFixture(publisher, downloader, repository, hash);
+        return new TransferFixture(publisher, downloader, repository, hash, temporaryFiles);
     }
 
     private static void writeDeterministicZip(Path path, long size) throws Exception {
@@ -442,7 +489,8 @@ class TransferFlowIntegrationTest {
     }
 
     private record TransferFixture(PublishFileService publisher, DownloadFileService downloader,
-                                   CountingTransferRepository repository, Sha256HashAdapter hash) {
+                                   CountingTransferRepository repository, Sha256HashAdapter hash,
+                                   TemporaryFileManager temporaryFiles) {
     }
 
     private static final class CountingTransferRepository implements TransferRepositoryPort {

@@ -54,9 +54,10 @@ public class DownloadFileService {
         if (Files.getFileStore(destination).getUsableSpace() < manifest.originalSize()) {
             throw new InsufficientDiskSpaceException("espaço insuficiente no destino");
         }
-        Path downloadDirectory = temporaryFiles.createDownloadDirectory(transferId);
-        LOGGER.info("transfer download started transferId={}", transferId);
-        try {
+        try (TemporaryFileManager.DownloadSession downloadSession =
+                     temporaryFiles.openDownloadSession(transferId)) {
+            Path downloadDirectory = downloadSession.directory();
+            LOGGER.info("transfer download started transferId={}", transferId);
             for (TransferChunk chunk : manifest.chunks()) {
                 Path cached = downloadDirectory.resolve(chunk.fileName()).normalize();
                 boolean cachedChunkIsValid;
@@ -110,6 +111,7 @@ public class DownloadFileService {
                     throw new TransferIntegrityException("arquivo de destino já existe: " + finalPath);
                 }
                 LOGGER.info("transfer download completed transferId={} path={}", transferId, finalPath);
+                downloadSession.close();
                 temporaryFiles.cleanup(downloadDirectory);
                 return finalPath;
             } catch (RuntimeException | IOException exception) {
