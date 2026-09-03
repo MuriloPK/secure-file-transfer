@@ -152,6 +152,7 @@ jobs:
             echo "- Chunk size exercised: \`$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES\` bytes"
             echo "- Transfer retention: \`$SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER\`"
             echo "- Stages: authentication, LFS pointer publication, manifest publication, listing, download, cleanup publication (when retention=false)"
+            echo "- Cleanup publication failures: fatal; the contract status is \`failure\` and logs retain the transfer UUID and exact \`transfers/<UUID>\` path (credentials redacted)"
             echo "- LFS storage: branch cleanup removes pointers; object retention is provider-specific (GitHub requires repository deletion/recreation)"
             echo "- Credentials: temporary HTTPS credential helper (secret redacted)"
           } >> "$GITHUB_STEP_SUMMARY"

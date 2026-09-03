@@ -306,8 +306,13 @@ não publiquem no mesmo repositório ao mesmo tempo.
 O resumo de cada execução registra o resultado (`success` ou `failure`), a
 branch, o modo de autenticação, o tamanho mínimo validado, o tamanho exercitado
 e as seis etapas: autenticação, publicação do ponteiro LFS, publicação do
-manifest, listagem, download e publicação da limpeza. Assim, o maior valor configurado que passou é o
-limite observado para essa execução; aumente
+manifest, listagem, download e publicação da limpeza. Uma falha ao publicar a
+limpeza é fatal: o teste termina com `failure`, em vez de registrar somente um
+aviso, e o log informa o UUID e o caminho exato `transfers/<UUID>` para a
+remoção manual. Se uma etapa principal e a limpeza falharem na mesma execução,
+a falha da etapa principal permanece como resultado principal e a falha de
+limpeza aparece como diagnóstico suplementar. Assim, o maior valor configurado
+que passou é o limite observado para essa execução; aumente
 `SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES` em uma execução posterior para
 verificar uma capacidade maior. O remoto e o token permanecem redigidos no
 resumo e nos erros do adapter. Uma falha de autenticação não deve ser

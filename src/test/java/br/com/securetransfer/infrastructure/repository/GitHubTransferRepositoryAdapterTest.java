@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.util.unit.DataSize;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
@@ -26,7 +27,10 @@ import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 class GitHubTransferRepositoryAdapterTest {
     private static final String LFS_CONTRACT_ENABLED = "SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST";
@@ -133,6 +137,45 @@ class GitHubTransferRepositoryAdapterTest {
                 "--", "transfers/" + transferId)).isBlank();
         assertThat(remoteObject).as("limpeza do ponteiro não deve purgar o objeto LFS").isRegularFile();
         assertThat(Files.size(remoteObject)).isEqualTo(content.length);
+    }
+
+    @Test
+    void reportsCleanupPublicationFailureAsAnExplicitContractFailure() throws Exception {
+        GitHubTransferRepositoryAdapter adapter = mock(GitHubTransferRepositoryAdapter.class);
+        TransferId transferId = TransferId.newId();
+        doThrow(new IOException("provider-secret must not be reported"))
+                .when(adapter).cleanupPublishedTransfer(transferId);
+
+        Throwable failure = catchThrowable(() -> cleanupContractTransfer(adapter, transferId, false));
+
+        assertThat(failure).isInstanceOf(AssertionError.class);
+        assertThat(failure.getMessage())
+                .contains("cleanup publication")
+                .contains("transferId=" + transferId)
+                .contains("path=transfers/" + transferId)
+                .doesNotContain("provider-secret");
+    }
+
+    @Test
+    void preservesPrimaryContractFailureWhenCleanupPublicationAlsoFails() throws Exception {
+        GitHubTransferRepositoryAdapter adapter = mock(GitHubTransferRepositoryAdapter.class);
+        TransferId transferId = TransferId.newId();
+        doThrow(new IOException("provider-secret must not be reported"))
+                .when(adapter).cleanupPublishedTransfer(transferId);
+        AssertionError primaryFailure = new AssertionError("primary contract stage failed");
+
+        assertThatThrownBy(() -> runContractWithCleanup(() -> {
+            throw primaryFailure;
+        }, adapter, transferId, false))
+                .isSameAs(primaryFailure)
+                .hasMessage("primary contract stage failed");
+        assertThat(primaryFailure.getSuppressed())
+                .hasSize(1);
+        assertThat(primaryFailure.getSuppressed()[0]).isInstanceOf(AssertionError.class);
+        assertThat(primaryFailure.getSuppressed()[0].getMessage())
+                .contains("cleanup publication")
+                .contains("path=transfers/" + transferId)
+                .doesNotContain("provider-secret");
     }
 
     @Test
@@ -509,9 +552,7 @@ class GitHubTransferRepositoryAdapterTest {
         var first = new GitHubTransferRepositoryAdapter(firstProperties, mapper);
 
         boolean retainTransfer = configuredRetention();
-        boolean contractSucceeded = false;
-        boolean cleanupSucceeded = false;
-        try {
+        boolean cleanupSucceeded = runContractWithCleanup(() -> {
             runContractStage("authentication and repository access", first::synchronize);
             runContractStage("LFS pointer publication", () -> {
                 first.publishChunk(transferId, chunk, source);
@@ -545,14 +586,11 @@ class GitHubTransferRepositoryAdapterTest {
                 assertThat(Files.size(downloaded)).isEqualTo(chunkBytes);
                 assertThat(Files.mismatch(source, downloaded)).isEqualTo(-1L);
             });
-            contractSucceeded = true;
             System.out.printf("Git LFS contract passed: stages=authentication, pointer-publication, "
                     + "manifest-publication, listing, download; chunkBytes=%d; minimumChunkBytes=%d; "
                     + "transferId=%s%n", chunkBytes, minimumChunkBytes, transferId);
-        } finally {
-            cleanupSucceeded = cleanupContractTransfer(first, transferId, retainTransfer);
-        }
-        if (contractSucceeded && cleanupSucceeded) {
+        }, first, transferId, retainTransfer);
+        if (cleanupSucceeded) {
             runContractStage("cleanup publication", () -> {
                 var observer = new GitHubTransferRepositoryAdapter(
                         hostedLfsProperties(remote, branch, temp.resolve("cleanup-observer")), mapper);
@@ -587,11 +625,46 @@ class GitHubTransferRepositoryAdapterTest {
             System.out.printf("Git LFS contract transfer cleaned: transferId=%s%n", transferId);
             return true;
         } catch (Exception | AssertionError cleanupFailure) {
-            System.err.printf("WARNING: Git LFS contract cleanup failed; transferId=%s; "
-                    + "remove only transfers/%s after inspection: %s%n",
-                    transferId, transferId, cleanupFailure.getMessage());
-            return false;
+            String safeFailure = GitHubTransferRepositoryAdapter.classifyFailure(
+                    "publicar limpeza da transferência " + transferId,
+                    cleanupFailure.getMessage() == null ? "" : cleanupFailure.getMessage());
+            throw new AssertionError("Git LFS contract stage failed: cleanup publication; transferId="
+                    + transferId + "; path=transfers/" + transferId + "; " + safeFailure);
         }
+    }
+
+    private static boolean runContractWithCleanup(ContractOperation operation,
+                                                   GitHubTransferRepositoryAdapter adapter,
+                                                   TransferId transferId,
+                                                   boolean retainTransfer) throws Exception {
+        Throwable primaryFailure = null;
+        try {
+            operation.run();
+        } catch (Exception | AssertionError failure) {
+            primaryFailure = failure;
+        }
+
+        AssertionError cleanupFailure = null;
+        boolean cleanupSucceeded = false;
+        try {
+            cleanupSucceeded = cleanupContractTransfer(adapter, transferId, retainTransfer);
+        } catch (AssertionError failure) {
+            cleanupFailure = failure;
+        }
+
+        if (primaryFailure != null) {
+            if (cleanupFailure != null) {
+                primaryFailure.addSuppressed(cleanupFailure);
+            }
+            if (primaryFailure instanceof Exception exception) {
+                throw exception;
+            }
+            throw (AssertionError) primaryFailure;
+        }
+        if (cleanupFailure != null) {
+            throw cleanupFailure;
+        }
+        return cleanupSucceeded;
     }
 
     private static void runContractStage(String stage, ContractOperation operation) throws Exception {
