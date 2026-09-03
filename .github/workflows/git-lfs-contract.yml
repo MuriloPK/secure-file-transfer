@@ -29,6 +29,9 @@ jobs:
       SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES }}
       SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES }}
       SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER || 'false' }}
+      GIT_LFS_CONTRACT_PAT_TOKEN: ${{ secrets.GIT_LFS_CONTRACT_PAT_TOKEN }}
+      GIT_LFS_CONTRACT_PROJECT_ACCESS_TOKEN: ${{ secrets.GIT_LFS_CONTRACT_PROJECT_ACCESS_TOKEN }}
+      GIT_LFS_CONTRACT_PROJECT_ACCESS_USERNAME: ${{ vars.GIT_LFS_CONTRACT_PROJECT_ACCESS_USERNAME }}
       GIT_TERMINAL_PROMPT: "0"
       GIT_ASKPASS: ""
 
@@ -70,27 +73,29 @@ jobs:
             *) echo "::error::SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER must be true or false"; exit 1 ;;
           esac
 
-      - name: Configure HTTPS credentials
+      - name: Configure GitLab HTTPS credentials
         shell: bash
-        env:
-          GIT_LFS_CONTRACT_HTTPS_TOKEN: ${{ secrets.GIT_LFS_CONTRACT_HTTPS_TOKEN }}
-          GIT_LFS_CONTRACT_HTTPS_USERNAME: ${{ vars.GIT_LFS_CONTRACT_HTTPS_USERNAME }}
         run: |
           set -euo pipefail
-          test -n "$GIT_LFS_CONTRACT_HTTPS_TOKEN" \
-            || { echo "::error::configure GIT_LFS_CONTRACT_HTTPS_TOKEN as an environment secret"; exit 1; }
-          https_username="${GIT_LFS_CONTRACT_HTTPS_USERNAME:-oauth2}"
-          token_file="$RUNNER_TEMP/git-lfs-contract-https-token"
-          username_file="$RUNNER_TEMP/git-lfs-contract-https-username"
+          test -n "$GIT_LFS_CONTRACT_PAT_TOKEN" \
+            || { echo "::error::configure GIT_LFS_CONTRACT_PAT_TOKEN as an environment secret"; exit 1; }
+          test -n "$GIT_LFS_CONTRACT_PROJECT_ACCESS_TOKEN" \
+            || { echo "::error::configure GIT_LFS_CONTRACT_PROJECT_ACCESS_TOKEN as an environment secret"; exit 1; }
+          test -n "$GIT_LFS_CONTRACT_PROJECT_ACCESS_USERNAME" \
+            || { echo "::error::configure GIT_LFS_CONTRACT_PROJECT_ACCESS_USERNAME as an environment variable"; exit 1; }
+          pat_token_file="$RUNNER_TEMP/git-lfs-contract-pat-token"
+          project_token_file="$RUNNER_TEMP/git-lfs-contract-project-token"
+          project_username_file="$RUNNER_TEMP/git-lfs-contract-project-username"
+          active_profile_file="$RUNNER_TEMP/git-lfs-contract-active-profile"
           helper_file="$RUNNER_TEMP/git-lfs-contract-https-credential-helper"
           umask 077
-          printf '%s' "$GIT_LFS_CONTRACT_HTTPS_TOKEN" > "$token_file"
-          printf '%s' "$https_username" > "$username_file"
+          printf '%s' "$GIT_LFS_CONTRACT_PAT_TOKEN" > "$pat_token_file"
+          printf '%s' "$GIT_LFS_CONTRACT_PROJECT_ACCESS_TOKEN" > "$project_token_file"
+          printf '%s' "$GIT_LFS_CONTRACT_PROJECT_ACCESS_USERNAME" > "$project_username_file"
           cat > "$helper_file" <<'HELPER'
           #!/usr/bin/env bash
           set -euo pipefail
-          token_file="${RUNNER_TEMP}/git-lfs-contract-https-token"
-          username_file="${RUNNER_TEMP}/git-lfs-contract-https-username"
+          active_profile_file="${RUNNER_TEMP}/git-lfs-contract-active-profile"
           case "${1:-}" in
             get)
               protocol=""
@@ -101,7 +106,18 @@ jobs:
                 esac
               done
               [[ "$protocol" == "https" ]] || exit 0
-              printf 'username=%s\n' "$(cat "$username_file")"
+              case "$(cat "$active_profile_file")" in
+                pat)
+                  username="oauth2"
+                  token_file="${RUNNER_TEMP}/git-lfs-contract-pat-token"
+                  ;;
+                project-access-token)
+                  username="$(cat "${RUNNER_TEMP}/git-lfs-contract-project-username")"
+                  token_file="${RUNNER_TEMP}/git-lfs-contract-project-token"
+                  ;;
+                *) exit 1 ;;
+              esac
+              printf 'username=%s\n' "$username"
               printf 'password=%s\n' "$(cat "$token_file")"
               ;;
             store|erase) exit 0 ;;
@@ -109,7 +125,10 @@ jobs:
           esac
           HELPER
           chmod 700 "$helper_file"
-          chmod 600 "$token_file" "$username_file"
+          chmod 600 \
+            "$pat_token_file" \
+            "$project_token_file" \
+            "$project_username_file"
           git config --global credential.helper ""
           git config --global --add credential.helper "$helper_file"
 
@@ -130,32 +149,54 @@ jobs:
           fi
           git lfs version
 
-      - name: Run hosted Git LFS contract
-        id: contract
-        run: ./mvnw -Dtest=GitHubTransferRepositoryAdapterTest test
+      - name: Run GitLab contract with PAT
+        id: pat_contract
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "pat" > "$RUNNER_TEMP/git-lfs-contract-active-profile"
+          ./mvnw -Dtest=GitHubTransferRepositoryAdapterTest test
+
+      - name: Run GitLab contract with project access token
+        id: project_access_token_contract
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "project-access-token" > "$RUNNER_TEMP/git-lfs-contract-active-profile"
+          ./mvnw -Dtest=GitHubTransferRepositoryAdapterTest test
 
       - name: Record contract result and observed limits
         if: always()
         shell: bash
         env:
-          CONTRACT_RESULT: ${{ steps.contract.outcome }}
+          PAT_CONTRACT_RESULT: ${{ steps.pat_contract.outcome }}
+          PROJECT_ACCESS_TOKEN_CONTRACT_RESULT: ${{ steps.project_access_token_contract.outcome }}
         run: |
           {
-            echo "## Git LFS hosted contract"
+            echo "## GitLab Git LFS hosted contract"
             echo ""
-            echo "- Result: \`$CONTRACT_RESULT\`"
             echo "- Provider: \`$SECURE_TRANSFER_GIT_LFS_TEST_PROVIDER\`"
             echo "- Remote: protected environment secret (redacted)"
             echo "- Branch: \`$SECURE_TRANSFER_GIT_LFS_TEST_BRANCH\`"
             echo "- Authentication mode: \`$SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE\`"
+            echo "- PAT using Basic Auth username \`oauth2\`: \`$PAT_CONTRACT_RESULT\`"
+            echo "- Project access token using GitLab-generated username (redacted): \`$PROJECT_ACCESS_TOKEN_CONTRACT_RESULT\`"
             echo "- Minimum chunk size validated: \`$SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES\` bytes"
             echo "- Chunk size exercised: \`$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES\` bytes"
             echo "- Transfer retention: \`$SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER\`"
-            echo "- Stages: authentication, LFS pointer publication, manifest publication, listing, download, cleanup publication (when retention=false)"
+            echo "- Stages per credential: authentication, LFS pointer publication, manifest publication, listing, download, cleanup publication (when retention=false)"
             echo "- Cleanup publication failures: fatal; the contract status is \`failure\` and logs retain the transfer UUID and exact \`transfers/<UUID>\` path (credentials redacted)"
             echo "- LFS storage: branch cleanup removes pointers; object retention is provider-specific (GitHub requires repository deletion/recreation)"
-            echo "- Credentials: temporary HTTPS credential helper (secret redacted)"
+            echo "- Credentials: temporary HTTPS credential helper; both tokens and the project username are redacted"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$PAT_CONTRACT_RESULT" != "success" || "$PROJECT_ACCESS_TOKEN_CONTRACT_RESULT" != "success" ]]; then
+            echo "::error::one or more GitLab HTTPS credential contract executions failed"
+            exit 1
+          fi
 
       - name: Remove temporary Git credentials
         if: always()
@@ -163,6 +204,8 @@ jobs:
         run: |
           rm -f \
             "$RUNNER_TEMP/git-lfs-contract-https-credential-helper" \
-            "$RUNNER_TEMP/git-lfs-contract-https-token" \
-            "$RUNNER_TEMP/git-lfs-contract-https-username"
+            "$RUNNER_TEMP/git-lfs-contract-active-profile" \
+            "$RUNNER_TEMP/git-lfs-contract-pat-token" \
+            "$RUNNER_TEMP/git-lfs-contract-project-token" \
+            "$RUNNER_TEMP/git-lfs-contract-project-username"
           git config --global --unset-all credential.helper >/dev/null 2>&1 || true
