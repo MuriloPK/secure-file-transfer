@@ -528,6 +528,30 @@ O procedimento de release é:
    uma tag publicada para tentar republicá-la. Corrija o código por um novo
    pull request e use uma nova versão de tag.
 
+#### Registro da validação hospedada
+
+Em 3 de setembro de 2026, a validação operacional deste ruleset não pôde ser
+concluída. A conexão GitHub disponível permitiu consultar os repositórios, mas:
+
+- nenhum dos 35 repositórios acessíveis continha
+  `.github/workflows/s3-contract.yml`;
+- os repositórios vazios encontrados (`commons`, `testes` e `front`) não podem
+  ser tratados como o remoto correto sem uma indicação explícita do projeto;
+- a consulta de rulesets nesses repositórios retornou HTTP 403 com a mensagem
+  de que é necessário GitHub Pro ou tornar o repositório público;
+- por isso, nenhuma tag foi criada, atualizada ou excluída, nenhum ator sem
+  bypass foi testado e nenhum workflow foi disparado. Não há identificadores
+  de execução a registrar.
+
+Este registro é uma pendência, não uma evidência de que `v*` está protegido.
+Para concluir a validação, primeiro associe este projeto a um repositório
+dedicado que contenha a branch `main`, commits e este workflow, e disponibilize
+rulesets para esse repositório. Depois repita os testes com atores separados:
+um ator sem bypass para as três operações proibidas e um ator autorizado para
+criar uma tag apontando para `main`; por fim, use uma revisão fora de `main`
+para confirmar a falha de `Verify release tag policy` e a ausência de execução
+do job `s3-contract`.
+
 ## Variáveis de ambiente
 
 | Variável | Obrigatória | Descrição |
