@@ -2,3 +2,4 @@
 - [Git LFS publication tests](git-lfs-publication-tests.md) — simulate rejected pushes from the remote hook so Git LFS's local pre-push hook remains usable.
 - [GitHub LFS retention](github-lfs-retention.md) — deleting LFS pointers does not free GitHub quota; purge requires repository recreation or provider support.
 - [Object storage availability boundary](object-storage-availability.md) — keep metadata and blobs separate; only a successfully written manifest makes a transfer visible.
+- [GitHub tag protection validation](github-tag-protection-validation.md) — operational checks need a populated remote and ruleset API access for private repositories.
