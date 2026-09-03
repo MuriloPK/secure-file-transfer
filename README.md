@@ -273,36 +273,35 @@ automatizar essa ação destrutiva. O remoto, as credenciais e a branch usados
 para o contrato permanecem configurados somente no ambiente protegido
 `git-lfs-contract`.
 
-#### Execução agendada contra um segundo provedor
+#### Execução agendada contra o segundo provedor (GitLab HTTPS)
 
 O workflow `Git LFS hosted contract` (`.github/workflows/git-lfs-contract.yml`)
-executa esse contrato manualmente ou em dias úteis, usando um ambiente protegido
-do GitHub Actions chamado `git-lfs-contract`. O remoto e a autenticação nunca
+executa esse contrato manualmente ou em dias úteis, usando exclusivamente HTTPS
+contra um repositório GitLab dedicado. O job usa o ambiente protegido
+`git-lfs-contract`; esse ambiente deve apontar para o segundo provedor,
+não para o repositório que hospeda o código. O remoto e a autenticação nunca
 ficam no repositório:
 
 | Tipo                 | Nome                                           | Conteúdo                                                                                       |
 | -------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Secret do ambiente   | `SECURE_TRANSFER_GIT_LFS_TEST_REMOTE`          | URL SSH ou HTTPS, sem usuário, senha ou token, do repositório descartável dedicado ao contrato |
-| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE`       | `https` (padrão) ou `ssh`; deve corresponder ao esquema do remoto                              |
-| Secret do ambiente   | `GIT_LFS_CONTRACT_SSH_PRIVATE_KEY`             | chave privada SSH do usuário/deploy key com acesso ao remoto                                   |
-| Secret do ambiente   | `GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS`             | chave(s) de host SSH do provedor                                                               |
+| Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_PROVIDER`       | `gitlab`; impede que este job seja apontado por engano para outro provedor                    |
+| Secret do ambiente   | `SECURE_TRANSFER_GIT_LFS_TEST_REMOTE`          | URL `https://gitlab.com/grupo/repositorio.git`, sem usuário, senha ou token                   |
+| Modo do workflow     | `SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE`       | fixo em `https`; o job falha se o contrato não estiver em HTTPS                              |
 | Secret do ambiente   | `GIT_LFS_CONTRACT_HTTPS_TOKEN`                 | token para o remoto HTTPS, consumido por um credential helper temporário                       |
-| Variável do ambiente | `GIT_LFS_CONTRACT_HTTPS_USERNAME`              | usuário enviado ao helper HTTPS; opcional, com padrão `oauth2`                                 |
+| Variável do ambiente | `GIT_LFS_CONTRACT_HTTPS_USERNAME`              | `oauth2` para PAT; para token de projeto, o usuário gerado pelo GitLab                        |
 | Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_BRANCH`          | branch descartável usada pelo contrato                                                         |
 | Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES` | menor chunk que deve ser aceito pelo armazenamento LFS                                         |
 | Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES`     | tamanho realmente exercitado; deve ser maior ou igual ao mínimo                                |
 | Variável do ambiente | `SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER` | `true` mantém a transferência para inspeção; `false` (padrão) remove-a após o download          |
 
-Configure esses valores somente no ambiente protegido, habilite a aprovação
-necessária para ele e dê ao workflow acesso ao ambiente. O remoto deve ser
-dedicado/descartável, ter Git LFS habilitado e usar a sintaxe SSH no modo `ssh`
-ou `https://` no modo `https`, sempre sem usuário, senha ou token embutido na
-URL. Use `ssh` para provedores com deploy keys e known hosts; use `https` quando
-o Git LFS do provedor só estiver disponível por HTTPS ou exigir um token e
-credential helper específico. Nesse modo, o workflow grava o token e o usuário
-somente em arquivos temporários protegidos, e o helper os fornece ao Git/Git
-LFS sem colocar o token na URL, nos logs ou no resumo. A execução é serializada
-para que duas execuções não publiquem no mesmo repositório ao mesmo tempo.
+Configure esses valores somente no ambiente protegido
+`git-lfs-contract`, habilite a aprovação necessária para ele e dê ao
+workflow acesso ao ambiente. O remoto deve ser dedicado/descartável, ter Git
+LFS habilitado e usar `https://gitlab.com/...`, sempre sem usuário, senha ou
+token embutido na URL. O workflow grava o token e o usuário somente em arquivos
+temporários protegidos, e o helper os fornece ao Git/Git LFS sem colocar o token
+na URL, nos logs ou no resumo. A execução é serializada para que duas execuções
+não publiquem no mesmo repositório ao mesmo tempo.
 
 O resumo de cada execução registra o resultado (`success` ou `failure`), a
 branch, o modo de autenticação, o tamanho mínimo validado, o tamanho exercitado
@@ -315,23 +314,22 @@ resumo e nos erros do adapter. Uma falha de autenticação não deve ser
 interpretada como falha de capacidade: o nome da etapa e a mensagem sanitizada
 distinguem as duas situações.
 
-Para a execução protegida que confirma o contrato HTTPS, deixe
-`SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE` ausente ou defina-o como `https`, use
-um remoto `https://` sem qualquer `usuario:senha@` e configure
-`GIT_LFS_CONTRACT_HTTPS_TOKEN` como secret do ambiente. O workflow usa
-`https` por padrão para evitar que uma execução de confirmação caia
+Para a execução protegida que confirma o contrato HTTPS no GitLab, use um remoto
+`https://gitlab.com/...` sem qualquer `usuario:senha@`, configure
+`GIT_LFS_CONTRACT_HTTPS_TOKEN` como secret do ambiente e mantenha
+`SECURE_TRANSFER_GIT_LFS_TEST_PROVIDER=gitlab` (o padrão do job). O modo HTTPS é
+fixo no workflow para evitar que uma execução de confirmação caia
 silenciosamente no caminho SSH. O valor de
 `GIT_LFS_CONTRACT_HTTPS_USERNAME` é enviado como o usuário do Basic Auth e o
 token é enviado como a senha, sempre por um helper temporário com permissão
-restrita. Se o provedor exigir um usuário específico, essa variável deve ser
-preenchida; não coloque o usuário na URL.
+restrita.
 
 Requisitos comuns dos provedores para esse modo:
 
 | Provedor | `GIT_LFS_CONTRACT_HTTPS_USERNAME` | Token e permissões mínimas |
 | -------- | -------------------------------- | -------------------------- |
 | GitHub  | login do usuário que criou o token | PAT clássico com `repo`, ou PAT fine-grained com acesso ao repositório e `Contents: Read and write`; Git LFS precisa estar habilitado |
-| GitLab  | `oauth2` (padrão) para PAT; use o usuário indicado pelo provedor para token de projeto | PAT ou project access token com `read_repository` e `write_repository` no projeto |
+| GitLab (segundo provedor validado pelo workflow) | `oauth2` para PAT; para project access token, o usuário gerado pelo GitLab | PAT ou project access token com `read_repository` e `write_repository` no projeto; Git LFS precisa estar habilitado |
 | Gitea/Forgejo | nome do usuário ou o usuário indicado pelo tipo de token | token com leitura e escrita no repositório e Git LFS habilitado |
 | Bitbucket Cloud | nome de usuário do workspace, não o e-mail | app password com `Repositories: Read` e `Repositories: Write`; confirme que Git LFS está habilitado |
 

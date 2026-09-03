@@ -15,13 +15,16 @@ concurrency:
 jobs:
   git-lfs-contract:
     runs-on: ubuntu-latest
+    # This protected environment is intentionally pointed at the second
+    # provider's disposable repository, not at the repository hosting this code.
     environment: git-lfs-contract
     env:
       SECURE_TRANSFER_GIT_LFS_CONTRACT_TEST: "true"
       SECURE_TRANSFER_GIT_LFS_TEST_REMOTE: ${{ secrets.SECURE_TRANSFER_GIT_LFS_TEST_REMOTE }}
-      # HTTPS is the default so this protected contract exercises the hosted
-      # credential-helper path unless SSH is explicitly requested.
-      SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE || 'https' }}
+      SECURE_TRANSFER_GIT_LFS_TEST_PROVIDER: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_PROVIDER || 'gitlab' }}
+      # This job is the second-provider HTTPS confirmation. Do not make the
+      # mode configurable here: a silent fallback to SSH would invalidate it.
+      SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE: "https"
       SECURE_TRANSFER_GIT_LFS_TEST_BRANCH: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_BRANCH }}
       SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES }}
       SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES: ${{ vars.SECURE_TRANSFER_GIT_LFS_TEST_MIN_CHUNK_BYTES }}
@@ -39,20 +42,14 @@ jobs:
           set -euo pipefail
           test -n "$SECURE_TRANSFER_GIT_LFS_TEST_REMOTE" \
             || { echo "::error::configure SECURE_TRANSFER_GIT_LFS_TEST_REMOTE as an environment secret"; exit 1; }
-          case "$SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE" in
-            ssh)
-              case "$SECURE_TRANSFER_GIT_LFS_TEST_REMOTE" in
-                https://*) echo "::error::SSH mode requires an SSH remote"; exit 1 ;;
-              esac
-              ;;
-            https)
-              case "$SECURE_TRANSFER_GIT_LFS_TEST_REMOTE" in
-                https://*) ;;
-                *) echo "::error::HTTPS mode requires an https:// remote"; exit 1 ;;
-              esac
-              ;;
-            *) echo "::error::SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE must be ssh or https"; exit 1 ;;
+          test "$SECURE_TRANSFER_GIT_LFS_TEST_PROVIDER" = "gitlab" \
+            || { echo "::error::this protected job is dedicated to the GitLab secondary provider"; exit 1; }
+          case "$SECURE_TRANSFER_GIT_LFS_TEST_REMOTE" in
+            https://gitlab.com/*) ;;
+            *) echo "::error::the GitLab secondary-provider contract requires an https://gitlab.com/ remote"; exit 1 ;;
           esac
+          test "$SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE" = "https" \
+            || { echo "::error::the secondary-provider contract must run in https mode"; exit 1; }
           test -n "$SECURE_TRANSFER_GIT_LFS_TEST_BRANCH" \
             || { echo "::error::configure SECURE_TRANSFER_GIT_LFS_TEST_BRANCH as an environment variable"; exit 1; }
           test -n "$SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES" \
@@ -73,28 +70,7 @@ jobs:
             *) echo "::error::SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER must be true or false"; exit 1 ;;
           esac
 
-      - name: Configure SSH credentials
-        if: env.SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE == 'ssh'
-        shell: bash
-        env:
-          GIT_LFS_CONTRACT_SSH_PRIVATE_KEY: ${{ secrets.GIT_LFS_CONTRACT_SSH_PRIVATE_KEY }}
-          GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS: ${{ secrets.GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          test -n "$GIT_LFS_CONTRACT_SSH_PRIVATE_KEY" \
-            || { echo "::error::configure GIT_LFS_CONTRACT_SSH_PRIVATE_KEY as an environment secret"; exit 1; }
-          test -n "$GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS" \
-            || { echo "::error::configure GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS as an environment secret"; exit 1; }
-          install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$GIT_LFS_CONTRACT_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
-          printf '%s\n' "$GIT_LFS_CONTRACT_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
-          {
-            echo "GIT_SSH_COMMAND=ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
-          } >> "$GITHUB_ENV"
-
       - name: Configure HTTPS credentials
-        if: env.SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE == 'https'
         shell: bash
         env:
           GIT_LFS_CONTRACT_HTTPS_TOKEN: ${{ secrets.GIT_LFS_CONTRACT_HTTPS_TOKEN }}
@@ -168,6 +144,7 @@ jobs:
             echo "## Git LFS hosted contract"
             echo ""
             echo "- Result: \`$CONTRACT_RESULT\`"
+            echo "- Provider: \`$SECURE_TRANSFER_GIT_LFS_TEST_PROVIDER\`"
             echo "- Remote: protected environment secret (redacted)"
             echo "- Branch: \`$SECURE_TRANSFER_GIT_LFS_TEST_BRANCH\`"
             echo "- Authentication mode: \`$SECURE_TRANSFER_GIT_LFS_TEST_AUTH_MODE\`"
@@ -176,7 +153,7 @@ jobs:
             echo "- Transfer retention: \`$SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER\`"
             echo "- Stages: authentication, LFS pointer publication, manifest publication, listing, download, cleanup publication (when retention=false)"
             echo "- LFS storage: branch cleanup removes pointers; object retention is provider-specific (GitHub requires repository deletion/recreation)"
-            echo "- Credentials: SSH key/known hosts or temporary HTTPS credential helper (secret redacted)"
+            echo "- Credentials: temporary HTTPS credential helper (secret redacted)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove temporary Git credentials
@@ -186,7 +163,5 @@ jobs:
           rm -f \
             "$RUNNER_TEMP/git-lfs-contract-https-credential-helper" \
             "$RUNNER_TEMP/git-lfs-contract-https-token" \
-            "$RUNNER_TEMP/git-lfs-contract-https-username" \
-            "$HOME/.ssh/id_ed25519" \
-            "$HOME/.ssh/known_hosts"
+            "$RUNNER_TEMP/git-lfs-contract-https-username"
           git config --global --unset-all credential.helper >/dev/null 2>&1 || true
