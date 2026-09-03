@@ -418,8 +418,11 @@ remoção. Transferências que já ficaram disponíveis são preservadas, e a ro
 pode ser executada novamente com segurança. O padrão é `24h`; defina um período
 maior que o tempo máximo esperado para uma publicação. A operação registra
 candidatos, remoções, objetos preservados e falhas, e o comando exibe essas
-quatro contagens. Uma transferência que já possui manifest nunca é removida,
-mesmo que seus chunks sejam antigos ou que a limpeza seja executada novamente.
+quatro contagens. Quando houver qualquer falha, o comando mantém o relatório
+visível e termina com status de falha para que execuções automatizadas não
+considerem a limpeza concluída. Uma transferência que já possui manifest nunca
+é removida, mesmo que seus chunks sejam antigos ou que a limpeza seja executada
+novamente.
 
 ### Teste de contrato S3-compatible hospedado
 

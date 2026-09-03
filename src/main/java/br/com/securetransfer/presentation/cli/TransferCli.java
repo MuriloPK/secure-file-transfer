@@ -109,7 +109,10 @@ public class TransferCli implements CommandLineRunner {
                         printUsage();
                         return;
                     }
-                    printCleanupReport(orphanedBlobCleaner.get().cleanupOrphanedBlobs());
+                    S3TransferRepositoryAdapter.OrphanedBlobCleanupReport report =
+                            orphanedBlobCleaner.get().cleanupOrphanedBlobs();
+                    printCleanupReport(report);
+                    failIfCleanupHadFailures(report);
                 }
                 default -> printUsage();
             }
@@ -181,6 +184,14 @@ public class TransferCli implements CommandLineRunner {
         System.out.println("Removidos: " + report.removed());
         System.out.println("Preservados (manifest presente): " + report.preserved());
         System.out.println("Falhas: " + report.failures());
+    }
+
+    private static void failIfCleanupHadFailures(
+            S3TransferRepositoryAdapter.OrphanedBlobCleanupReport report) {
+        if (report.failures() > 0) {
+            throw new IllegalStateException(
+                    "limpeza de blobs órfãos terminou com " + report.failures() + " falha(s)");
+        }
     }
 
     private static void printPublished(TransferManifest manifest) {

@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -35,19 +36,38 @@ class TransferCliTest {
     }
 
     @Test
-    void cleanupCommandDisplaysAllCleanupCounts() throws Exception {
+    void cleanupCommandDisplaysAllCountsAndFailsWhenReportContainsFailures() throws Exception {
         S3TransferRepositoryAdapter cleaner = mock(S3TransferRepositoryAdapter.class);
         when(cleaner.cleanupOrphanedBlobs())
                 .thenReturn(new S3TransferRepositoryAdapter.OrphanedBlobCleanupReport(7, 3, 2, 2));
         TransferCli cli = newCli(Optional.of(cleaner));
 
-        cli.run("cleanup-orphaned-blobs");
+        assertThatThrownBy(() -> cli.run("cleanup-orphaned-blobs"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("2 falha(s)");
 
         assertThat(output.toString(StandardCharsets.UTF_8))
                 .contains("Candidatos: 7")
                 .contains("Removidos: 3")
                 .contains("Preservados (manifest presente): 2")
                 .contains("Falhas: 2");
+        verify(cleaner).cleanupOrphanedBlobs();
+    }
+
+    @Test
+    void cleanupCommandCompletesWhenReportHasNoFailures() throws Exception {
+        S3TransferRepositoryAdapter cleaner = mock(S3TransferRepositoryAdapter.class);
+        when(cleaner.cleanupOrphanedBlobs())
+                .thenReturn(new S3TransferRepositoryAdapter.OrphanedBlobCleanupReport(4, 3, 1, 0));
+        TransferCli cli = newCli(Optional.of(cleaner));
+
+        cli.run("cleanup-orphaned-blobs");
+
+        assertThat(output.toString(StandardCharsets.UTF_8))
+                .contains("Candidatos: 4")
+                .contains("Removidos: 3")
+                .contains("Preservados (manifest presente): 1")
+                .contains("Falhas: 0");
         verify(cleaner).cleanupOrphanedBlobs();
     }
 
