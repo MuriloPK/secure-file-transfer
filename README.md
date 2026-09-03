@@ -543,27 +543,41 @@ O procedimento de release é:
 
 #### Registro da validação hospedada
 
-Em 3 de setembro de 2026, a validação operacional deste ruleset não pôde ser
-concluída. A conexão GitHub disponível permitiu consultar os repositórios, mas:
+Em 3 de setembro de 2026, a validação foi concluída no repositório público
+dedicado
+[`MuriloPK/secure-file-transfer`](https://github.com/MuriloPK/secure-file-transfer).
+A branch `main` contém o histórico do projeto e os workflows hospedados.
+O ruleset
+[`Protect release tags`](https://github.com/MuriloPK/secure-file-transfer/rules/22186419)
+foi consultado novamente pela API depois da criação e apresentou:
 
-- nenhum dos 35 repositórios acessíveis continha
-  `.github/workflows/s3-contract.yml`;
-- os repositórios vazios encontrados (`commons`, `testes` e `front`) não podem
-  ser tratados como o remoto correto sem uma indicação explícita do projeto;
-- a consulta de rulesets nesses repositórios retornou HTTP 403 com a mensagem
-  de que é necessário GitHub Pro ou tornar o repositório público;
-- por isso, nenhuma tag foi criada, atualizada ou excluída, nenhum ator sem
-  bypass foi testado e nenhum workflow foi disparado. Não há identificadores
-  de execução a registrar.
+- enforcement `active`, target `tag` e padrão incluído `refs/tags/v*`;
+- bypass permanente somente para o papel `Repository administrators`;
+- regras `creation`, `update` e `deletion`.
 
-Este registro é uma pendência, não uma evidência de que `v*` está protegido.
-Para concluir a validação, primeiro associe este projeto a um repositório
-dedicado que contenha a branch `main`, commits e este workflow, e disponibilize
-rulesets para esse repositório. Depois repita os testes com atores separados:
-um ator sem bypass para as três operações proibidas e um ator autorizado para
-criar uma tag apontando para `main`; por fim, use uma revisão fora de `main`
-para confirmar a falha de `Verify release tag policy` e a ausência de execução
-do job `s3-contract`.
+Os testes operacionais usaram tags descartáveis:
+
+1. Um administrador criou `v0.0.0-ruleset-validation` apontando exatamente para
+   `main`. A execução
+   [33746797201](https://github.com/MuriloPK/secure-file-transfer/actions/runs/33746797201)
+   concluiu `Verify release tag policy` e `s3-contract` com `success`.
+2. O workflow manual `Release tag ruleset validation` usou o `GITHUB_TOKEN`
+   com `contents: write`, sem bypass. A execução
+   [33746940908](https://github.com/MuriloPK/secure-file-transfer/actions/runs/33746940908)
+   recebeu rejeições do ruleset ao criar
+   `v0.0.0-denied-create-33746940908`, atualizar
+   `v0.0.0-ruleset-validation` e excluir essa mesma tag; o job só terminou com
+   `success` depois de reconhecer as três rejeições.
+3. Um administrador criou `v0.0.0-invalid-ancestry-validation` apontando para o
+   commit órfão `57e34af0ef2d3cf0ebf306c7f794fcf074236c79`, fora de `main`. A
+   execução
+   [33746986594](https://github.com/MuriloPK/secure-file-transfer/actions/runs/33746986594)
+   terminou com `failure` em `Verify release tag policy`, e `s3-contract`
+   permaneceu `skipped`.
+
+As duas tags e a chave de implantação temporária foram removidas depois da
+validação. As credenciais do `GITHUB_TOKEN` permaneceram gerenciadas pelo
+GitHub Actions e não foram incluídas em URLs, argumentos, logs ou resumos.
 
 ## Variáveis de ambiente
 
