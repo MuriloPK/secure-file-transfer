@@ -546,6 +546,74 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void republishesAlreadyPublishedLfsChunkAfterCommittingPreservedChangeToOtherFile(@TempDir Path temp)
+            throws Exception {
+        Path remote = createRemoteRepository(temp);
+        Path clone = temp.resolve("clone");
+        StorageProperties properties = propertiesWithLfs(remote, clone);
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var adapter = new GitHubTransferRepositoryAdapter(properties, mapper);
+        adapter.synchronize();
+
+        TransferId transferId = TransferId.newId();
+        byte[] initialContent = "initial-data".getBytes();
+        TransferChunk chunk = chunk(initialContent, "part-00001.bin");
+        Path source = temp.resolve("chunk.bin");
+        Files.write(source, initialContent);
+        adapter.publishChunk(transferId, chunk, source);
+        adapter.publishManifest(manifest(transferId, "arquivo.zip", initialContent, chunk));
+
+        String publishedHead = runCapture(clone, "git", "rev-parse", "HEAD").trim();
+        Path readme = clone.resolve("README");
+        String localChange = "manual README edit during LFS republication";
+        installRemotePushFailureWithConcurrentEdit(remote, readme, localChange);
+
+        byte[] republishedContent = "updated-data".getBytes();
+        Files.write(source, republishedContent);
+        assertThatThrownBy(() -> adapter.publishChunk(transferId, chunk, source))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("rollback concluído")
+                .hasMessageContaining("alterações locais")
+                .hasMessageContaining("preservadas no clone")
+                .hasMessageContaining("faça commit ou descarte-as");
+
+        adapter.synchronize();
+        assertThat(Files.readString(readme)).isEqualTo(localChange);
+        run(clone, "git", "add", "--", "README");
+        run(clone, "git", "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+                "commit", "-m", "preservar edição no README");
+        String preservedChangeHead = runCapture(clone, "git", "rev-parse", "HEAD").trim();
+        assertThat(runCapture(clone, "git", "status", "--porcelain", "--untracked-files=all")).isBlank();
+        Files.delete(remote.resolve("hooks").resolve("pre-receive"));
+
+        adapter.publishChunk(transferId, chunk, source);
+
+        assertThat(Files.readAllBytes(clone.resolve("transfers").resolve(transferId.toString())
+                .resolve("chunks").resolve(chunk.fileName()))).containsExactly(republishedContent);
+        assertThat(Files.readString(readme)).isEqualTo(localChange);
+        assertThat(runCapture(clone, "git", "status", "--porcelain", "--untracked-files=all")).isBlank();
+        assertThat(runCapture(clone, "git", "diff", "--cached")).isBlank();
+        assertThat(runCapture(clone, "git", "rev-parse", "HEAD^").trim()).isEqualTo(preservedChangeHead);
+        assertThat(runCapture(clone, "git", "rev-parse", "HEAD^^").trim()).isEqualTo(publishedHead);
+        assertThat(runCapture(clone, "git", "rev-list", "--count", "HEAD").trim()).isEqualTo("5");
+        assertThat(runCapture(clone, "git", "log", "-2", "--pretty=%s"))
+                .isEqualTo("publicar chunk 1 da transferência " + transferId + "\n"
+                        + "preservar edição no README\n");
+        assertThat(runCapture(remote, "git", "rev-parse", "main").trim())
+                .isEqualTo(runCapture(clone, "git", "rev-parse", "HEAD").trim());
+
+        var observer = new GitHubTransferRepositoryAdapter(
+                propertiesWithLfs(remote, temp.resolve("observer")), mapper);
+        observer.synchronize();
+        assertThat(Files.readString(temp.resolve("observer").resolve("README"))).isEqualTo(localChange);
+        assertThat(observer.listTransfers()).extracting(TransferManifest::transferId)
+                .containsExactly(transferId.value());
+        try (InputStream downloaded = observer.downloadChunk(transferId, chunk)) {
+            assertThat(downloaded.readAllBytes()).containsExactly(republishedContent);
+        }
+    }
+
+    @Test
     void rejectsBlobAboveConfiguredLimitWithoutExposingRemoteDetails(@TempDir Path temp) throws Exception {
         StorageProperties properties = properties(temp.resolve("remote.git"), temp.resolve("clone"));
         properties.getGit().setMaxBlobSize(DataSize.ofBytes(3));
