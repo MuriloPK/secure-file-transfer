@@ -51,12 +51,8 @@ jobs:
     needs: release-tag-policy
     runs-on: ubuntu-latest
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.S3_CONTRACT_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_CONTRACT_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: us-east-1
       AWS_EC2_METADATA_DISABLED: "true"
-      MINIO_ROOT_USER: ${{ secrets.S3_CONTRACT_ACCESS_KEY_ID }}
-      MINIO_ROOT_PASSWORD: ${{ secrets.S3_CONTRACT_SECRET_ACCESS_KEY }}
       MINIO_IMAGE: minio/minio:RELEASE.2024-06-13T22-53-53Z
       SECURE_TRANSFER_S3_CONTRACT_TEST: "true"
       SECURE_TRANSFER_S3_TEST_BUCKET: secure-transfer-contract
@@ -69,6 +65,20 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Configure disposable MinIO credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          minio_root_user="minio-contract"
+          minio_root_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$minio_root_password"
+          {
+            echo "AWS_ACCESS_KEY_ID=$minio_root_user"
+            echo "AWS_SECRET_ACCESS_KEY=$minio_root_password"
+            echo "MINIO_ROOT_USER=$minio_root_user"
+            echo "MINIO_ROOT_PASSWORD=$minio_root_password"
+          } >> "$GITHUB_ENV"
 
       - name: Start disposable MinIO
         run: |
