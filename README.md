@@ -238,6 +238,41 @@ transferência; após a inspeção, remova somente `transfers/<UUID>` nesse bran
 descartável, faça commit e push. Para a execução agendada normal, mantenha a
 variável ausente ou em `false`.
 
+#### Retenção dos objetos LFS no GitHub
+
+A limpeza do contrato remove e publica o diretório `transfers/<UUID>`, mas isso
+remove somente os ponteiros LFS alcançáveis pelo branch. No GitHub, o objeto
+LFS correspondente continua no armazenamento remoto e continua contando para a
+cota de Git LFS; apagar o arquivo do histórico não inicia um garbage
+collection. Essa é a política documentada pelo GitHub em
+[Removing files from Git Large File Storage](https://docs.github.com/en/repositories/working-with-files/managing-large-files/removing-files-from-git-large-file-storage#git-lfs-objects-in-your-repository).
+
+O teste local `cleanupRemovesLfsPointerButDoesNotPurgeRemoteLfsObject` mantém
+essa fronteira explícita: o ponteiro desaparece do branch, enquanto o objeto
+LFS ainda existe no armazenamento do remoto bare. O contrato hospedado também
+inclui uma etapa de `cleanup publication` que sincroniza um clone novo e
+confirma que o diretório não está mais listado. Essa etapa confirma a limpeza
+do catálogo no provedor, não uma redução da cota LFS.
+
+Para confirmar a liberação de armazenamento no GitHub, use somente o
+repositório descartável do contrato:
+
+1. Execute o workflow com `SECURE_TRANSFER_GIT_LFS_TEST_RETAIN_TRANSFER=false`
+   e confirme no resumo que `cleanup publication` removeu o diretório.
+2. Registre a métrica de armazenamento LFS exibida pelo GitHub para esse
+   repositório. Ela pode continuar incluindo o objeto mesmo sem nenhum
+   ponteiro no branch.
+3. Para purgar o objeto, apague e recrie o repositório descartável e confira a
+   métrica novamente após o GitHub processar a remoção. Se o repositório não
+   puder ser recriado, solicite ao suporte do GitHub o purge do objeto
+   órfão. A exclusão do repositório também remove issues, estrelas e forks,
+   por isso essa verificação nunca deve usar um repositório de produção.
+
+Não há uma opção de produção nem um token de exclusão no workflow para
+automatizar essa ação destrutiva. O remoto, as credenciais e a branch usados
+para o contrato permanecem configurados somente no ambiente protegido
+`git-lfs-contract`.
+
 #### Execução agendada contra um segundo provedor
 
 O workflow `Git LFS hosted contract` (`.github/workflows/git-lfs-contract.yml`)
@@ -271,8 +306,8 @@ para que duas execuções não publiquem no mesmo repositório ao mesmo tempo.
 
 O resumo de cada execução registra o resultado (`success` ou `failure`), a
 branch, o modo de autenticação, o tamanho mínimo validado, o tamanho exercitado
-e as cinco etapas: autenticação, publicação do ponteiro LFS, publicação do
-manifest, listagem e download. Assim, o maior valor configurado que passou é o
+e as seis etapas: autenticação, publicação do ponteiro LFS, publicação do
+manifest, listagem, download e publicação da limpeza. Assim, o maior valor configurado que passou é o
 limite observado para essa execução; aumente
 `SECURE_TRANSFER_GIT_LFS_TEST_CHUNK_BYTES` em uma execução posterior para
 verificar uma capacidade maior. O remoto e o token permanecem redigidos no

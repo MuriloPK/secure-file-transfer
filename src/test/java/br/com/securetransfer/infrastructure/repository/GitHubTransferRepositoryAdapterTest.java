@@ -104,6 +104,38 @@ class GitHubTransferRepositoryAdapterTest {
     }
 
     @Test
+    void cleanupRemovesLfsPointerButDoesNotPurgeRemoteLfsObject(@TempDir Path temp) throws Exception {
+        Path remote = createRemoteRepository(temp);
+        Path clone = temp.resolve("clone");
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var adapter = new GitHubTransferRepositoryAdapter(propertiesWithLfs(remote, clone), mapper);
+        adapter.synchronize();
+
+        TransferId transferId = TransferId.newId();
+        byte[] content = "orphaned-lfs-content".getBytes();
+        TransferChunk chunk = chunk(content, "part-00001.bin");
+        Path source = temp.resolve("chunk.bin");
+        Files.write(source, content);
+
+        adapter.publishChunk(transferId, chunk, source);
+        adapter.publishManifest(manifest(transferId, "orphaned.zip", content, chunk));
+
+        String objectId = lfsObjectId(source);
+        Path remoteObject = lfsObjectPath(remote, objectId);
+        assertThat(remoteObject).as("objeto LFS publicado no armazenamento remoto").isRegularFile();
+        assertThat(Files.size(remoteObject)).isEqualTo(content.length);
+
+        adapter.cleanupPublishedTransfer(transferId);
+
+        assertThat(adapter.listTransfers()).extracting(TransferManifest::transferId)
+                .doesNotContain(transferId.value());
+        assertThat(runCapture(remote, "git", "ls-tree", "-r", "--name-only", "main",
+                "--", "transfers/" + transferId)).isBlank();
+        assertThat(remoteObject).as("limpeza do ponteiro não deve purgar o objeto LFS").isRegularFile();
+        assertThat(Files.size(remoteObject)).isEqualTo(content.length);
+    }
+
+    @Test
     void concurrentClonesDoNotExposeManifestFromRejectedPushAndCanRetry(@TempDir Path temp) throws Exception {
         Path remote = createRemoteRepository(temp);
         Path cloneA = temp.resolve("clone-a");
@@ -413,6 +445,8 @@ class GitHubTransferRepositoryAdapterTest {
         var first = new GitHubTransferRepositoryAdapter(firstProperties, mapper);
 
         boolean retainTransfer = configuredRetention();
+        boolean contractSucceeded = false;
+        boolean cleanupSucceeded = false;
         try {
             runContractStage("authentication and repository access", first::synchronize);
             runContractStage("LFS pointer publication", () -> {
@@ -447,11 +481,23 @@ class GitHubTransferRepositoryAdapterTest {
                 assertThat(Files.size(downloaded)).isEqualTo(chunkBytes);
                 assertThat(Files.mismatch(source, downloaded)).isEqualTo(-1L);
             });
+            contractSucceeded = true;
             System.out.printf("Git LFS contract passed: stages=authentication, pointer-publication, "
                     + "manifest-publication, listing, download; chunkBytes=%d; minimumChunkBytes=%d; "
                     + "transferId=%s%n", chunkBytes, minimumChunkBytes, transferId);
         } finally {
-            cleanupContractTransfer(first, transferId, retainTransfer);
+            cleanupSucceeded = cleanupContractTransfer(first, transferId, retainTransfer);
+        }
+        if (contractSucceeded && cleanupSucceeded) {
+            runContractStage("cleanup publication", () -> {
+                var observer = new GitHubTransferRepositoryAdapter(
+                        hostedLfsProperties(remote, branch, temp.resolve("cleanup-observer")), mapper);
+                observer.synchronize();
+                assertThat(observer.listTransfers()).extracting(TransferManifest::transferId)
+                        .doesNotContain(transferId.value());
+            });
+            System.out.printf("Git LFS contract cleanup passed: pointer removed from branch; "
+                    + "GitHub LFS object remains subject to provider retention; transferId=%s%n", transferId);
         }
     }
 
@@ -466,19 +512,21 @@ class GitHubTransferRepositoryAdapterTest {
         return Boolean.parseBoolean(value);
     }
 
-    private static void cleanupContractTransfer(GitHubTransferRepositoryAdapter adapter, TransferId transferId,
-                                                boolean retainTransfer) {
+    private static boolean cleanupContractTransfer(GitHubTransferRepositoryAdapter adapter, TransferId transferId,
+                                                    boolean retainTransfer) {
         if (retainTransfer) {
             System.out.printf("Git LFS contract transfer retained for inspection: transferId=%s%n", transferId);
-            return;
+            return false;
         }
         try {
             adapter.cleanupPublishedTransfer(transferId);
             System.out.printf("Git LFS contract transfer cleaned: transferId=%s%n", transferId);
+            return true;
         } catch (Exception | AssertionError cleanupFailure) {
             System.err.printf("WARNING: Git LFS contract cleanup failed; transferId=%s; "
                     + "remove only transfers/%s after inspection: %s%n",
                     transferId, transferId, cleanupFailure.getMessage());
+            return false;
         }
     }
 
@@ -624,6 +672,23 @@ class GitHubTransferRepositoryAdapterTest {
                 remaining -= length;
             }
         }
+    }
+
+    private static String lfsObjectId(Path source) throws Exception {
+        String pointer = runCapture(source.toAbsolutePath().getParent(), "git", "lfs", "pointer",
+                "--file", source.toAbsolutePath().toString());
+        return pointer.lines()
+                .filter(line -> line.startsWith("oid sha256:"))
+                .map(line -> line.substring("oid sha256:".length()).trim())
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Git LFS não gerou um oid para o chunk"));
+    }
+
+    private static Path lfsObjectPath(Path remote, String objectId) {
+        return remote.resolve("lfs").resolve("objects")
+                .resolve(objectId.substring(0, 2))
+                .resolve(objectId.substring(2, 4))
+                .resolve(objectId);
     }
 
     private static Path createRemoteRepository(Path temp) throws Exception {
